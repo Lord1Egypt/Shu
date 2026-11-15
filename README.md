@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/Lord1Egypt/Ptah/actions/workflows/tests.yml"><img src="https://github.com/Lord1Egypt/Ptah/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
-  <img src="https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/dependencies-none-2ea44f" alt="No dependencies">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-0b1f3a?logo=linux&logoColor=white" alt="Linux and WSL2">
   <img src="https://img.shields.io/badge/license-MIT-c8962e" alt="MIT license">
@@ -49,7 +49,17 @@ Real runs on a laptop: **Intel i7-9750H (6 cores), 12.7 GiB RAM (WSL2), NVIDIA R
 Ollama 0.40 with its bundled llama.cpp. Every number below was measured by `ptah bench` /
 `ptah apply --verify`, not estimated.
 
-<!-- RESULTS -->
+| Model | Size | Budget | Engine | RAM used / limit | VRAM used / limit | CPU cores used / limit | GPU peak | Speed |
+|---|---|---|---|---|---|---|---|---|
+| Qwen3.5 4B Q4_K_M + vision | 3.1 GiB | 30% | Ollama model | 2.83 / 3.80 GiB | 1.75 / 1.80 GiB | 2.7 / 3.6 | 60 °C | 6.59 tok/s |
+| Qwen3.5 4B Q4_K_M | 2.5 GiB | 25% | caged llama.cpp | 2.66 / 3.17 GiB | 1.36 / 1.50 GiB | 2.0 / 3.0 | 60 °C | 5.68 tok/s |
+| Qwen3.5 4B Q4_K_M | 2.5 GiB | 30% | caged llama.cpp | 2.18 / 3.80 GiB | 1.69 / 1.80 GiB | 3.0 / 3.6 | 61 °C | 6.16 tok/s |
+| Qwen3.5 4B Q4_K_M | 2.5 GiB | 35% | caged llama.cpp | 1.85 / 4.43 GiB | 2.02 / 2.10 GiB | 3.6 / 4.2 | 62 °C | 7.07 tok/s |
+| Qwen3.5 4B requantized to Q3_K_M | 2.1 GiB | 30% | caged llama.cpp | 2.66 / 3.80 GiB | 1.73 / 1.80 GiB | 1.4 / 3.6 | 62 °C | 3.06 tok/s |
+| Gemma 4 E4B 7.5B Q4_K_M | 5.0 GiB | 30% | caged llama.cpp | 3.50 / 3.80 GiB | 1.55 / 1.80 GiB | 2.8 / 3.6 | 61 °C | 4.41 tok/s |
+| SmolLM2 135M Q4_K_M (from safetensors) | 0.1 GiB | 30% | caged llama.cpp | 0.60 / 3.80 GiB | 0.30 / 1.80 GiB | 1.0 / 3.6 | 60 °C | 76.94 tok/s |
+
+The requantized Q3_K_M model fit the budget but ran slower than Q4_K_M on this machine (3.1 vs 6.2 tokens/s); the cause is not yet diagnosed.
 
 ## Honest expectations for very large models
 
@@ -57,7 +67,7 @@ Ptah makes a model **fit**. It cannot make a model that is ten times larger than
 your memory **fast**: every weight that does not fit in RAM is read from disk
 again for each token. Ptah tells you this before you wait for it.
 
-<!-- EXPECTATIONS -->
+Measured example: the 5.0 GiB model above, squeezed into a 2 GiB RAM cage with 1 GiB of VRAM, stayed inside the limit but produced about one token every 35 seconds (measured with an earlier cage setting that has since been changed; not yet re-measured). For a 70B model at Q4_K_M (about 42 GiB) on this laptop, `ptah plan` reports roughly 38 GiB re-read from disk per token, which means minutes per token.
 
 The rule of thumb: a model runs at a useful speed when its file is at most about
 as large as the RAM plus VRAM you give it. Beyond that it still runs, inside the
@@ -73,7 +83,7 @@ python3 -m ptah            # run from the checkout, or:
 pip install .              # installs the `ptah` command
 ```
 
-Requirements: Linux or WSL2, Python 3.9 or newer, and an engine: either
+Requirements: Linux or WSL2, Python 3.10 or newer, and an engine: either
 [Ollama](https://ollama.com) (which bundles llama.cpp's server and quantizer) or
 [llama.cpp](https://github.com/ggml-org/llama.cpp) on your `PATH`.
 An NVIDIA GPU is optional; without one Ptah plans CPU-only.
