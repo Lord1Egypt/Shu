@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-label="Ptah: big models, small footprint">
+  <defs>
+    <linearGradient id="night" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0c2240"/>
+      <stop offset="1" stop-color="#050b16"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f3d27a"/>
+      <stop offset="1" stop-color="#c8962e"/>
+    </linearGradient>
+    <pattern id="steps" width="36" height="14" patternUnits="userSpaceOnUse">
+      <path d="M0 14 L18 0 L36 14 Z" fill="#c8962e" opacity="0.55"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="360" rx="18" fill="url(#night)"/>
+  <rect x="0" y="0" width="1280" height="14" fill="url(#steps)"/>
+  <rect x="0" y="346" width="1280" height="14" fill="url(#steps)" transform="translate(0 706) scale(1 -1)"/>
+  <rect x="40" y="34" width="1200" height="292" rx="10" fill="none" stroke="#c8962e" stroke-opacity="0.35" stroke-width="1.5"/>
+
+  <!-- Pyramid mark -->
+  <g transform="translate(96 92)">
+    <path d="M70 0 L140 150 L0 150 Z" fill="none" stroke="url(#gold)" stroke-width="5" stroke-linejoin="round"/>
+    <path d="M70 0 L70 150" stroke="#c8962e" stroke-opacity="0.45" stroke-width="2"/>
+    <path d="M49 105 L91 105 L140 150 L0 150 Z" fill="url(#gold)" opacity="0.9"/>
+    <circle cx="70" cy="-22" r="9" fill="url(#gold)"/>
+  </g>
+
+  <text x="290" y="172" font-family="Georgia, 'Times New Roman', serif" font-size="112" font-weight="700" letter-spacing="18" fill="url(#gold)">PTAH</text>
+  <text x="294" y="222" font-family="Georgia, 'Times New Roman', serif" font-size="30" fill="#e9edf5">Big models. Small footprint.</text>
+  <text x="294" y="266" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" letter-spacing="2" fill="#8fa3c2">GGUF  ·  OLLAMA  ·  LLAMA.CPP  ·  LM STUDIO</text>
+
+  <!-- Budget meters -->
+  <g font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" fill="#c9d4e6">
+    <g transform="translate(840 112)">
+      <text x="0" y="15">RAM</text>
+      <rect x="62" y="0" width="270" height="20" rx="10" fill="#16304f"/>
+      <rect x="62" y="0" width="81" height="20" rx="10" fill="url(#gold)"/>
+      <text x="344" y="15" fill="#f3d27a">30%</text>
+    </g>
+    <g transform="translate(840 166)">
+      <text x="0" y="15">CPU</text>
+      <rect x="62" y="0" width="270" height="20" rx="10" fill="#16304f"/>
+      <rect x="62" y="0" width="81" height="20" rx="10" fill="url(#gold)"/>
+      <text x="344" y="15" fill="#f3d27a">30%</text>
+    </g>
+    <g transform="translate(840 220)">
+      <text x="0" y="15">GPU</text>
+      <rect x="62" y="0" width="270" height="20" rx="10" fill="#16304f"/>
+      <rect x="62" y="0" width="81" height="20" rx="10" fill="url(#gold)"/>
+      <text x="344" y="15" fill="#f3d27a">30%</text>
+    </g>
+  </g>
+</svg>

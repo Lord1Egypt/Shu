@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ptah-gguf"
+dynamic = ["version"]
+description = "Fit GGUF models inside a fixed share of a machine's RAM, CPU and GPU: for Ollama, llama.cpp and LM Studio"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["gguf", "llama.cpp", "ollama", "lm-studio", "llm", "quantization", "cgroups", "low-vram"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/Lord1Egypt/Ptah"
+
+[project.scripts]
+ptah = "ptah.cli:main"
+
+[tool.setuptools]
+packages = ["ptah"]
+
+[tool.setuptools.dynamic]
+version = { attr = "ptah.__version__" }
