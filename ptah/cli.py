@@ -520,7 +520,7 @@ def main(argv=None):
     try:
         return args.handler(args)
     except KeyboardInterrupt:
-        print("\n  Cancelled.")
+        print("\n  Cancelled.", file=sys.stderr)
         return 130
     except ERRORS as error:
         print(f"ptah: {error}", file=sys.stderr)

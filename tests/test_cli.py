@@ -154,7 +154,7 @@ class PiecesTest(unittest.TestCase):
         budget = {"ram": 4 * GIB, "cpu_quota": 360}
         prefix = engine.cage_prefix(budget, "ptah-test")
         self.assertIn(f"MemoryMax={4 * GIB}", prefix)
-        self.assertIn(f"MemoryHigh={int(4 * GIB * engine.RECLAIM_POINT)}", prefix)
+        self.assertFalse(any(part.startswith("MemoryHigh") for part in prefix))
         self.assertIn("MemorySwapMax=0", prefix)
         self.assertIn("CPUQuota=360%", prefix)
         self.assertEqual(prefix[-1], "--")

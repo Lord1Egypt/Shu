@@ -19,7 +19,6 @@ import urllib.request
 from . import hardware
 
 RESUME_MARGIN = 5.0          # degrees below the limit at which a paused server resumes
-RECLAIM_POINT = 0.92         # MemoryHigh as a share of the budget, so reclaim starts before the ceiling
 
 
 class EngineError(RuntimeError):
@@ -69,7 +68,8 @@ def cage_prefix(budget, unit):
     """systemd-run arguments that enforce the RAM and CPU share of ``budget``."""
     return [
         "systemd-run", "--user", "--scope", "--quiet", "--collect", "--unit", unit,
-        "-p", f"MemoryHigh={int(budget['ram'] * RECLAIM_POINT)}",
+        # MemoryMax alone: at the ceiling the kernel reclaims model pages and carries on.
+        # MemoryHigh would add deliberate stalls on top (measured: several times slower).
         "-p", f"MemoryMax={budget['ram']}",
         "-p", "MemorySwapMax=0",
         "-p", f"CPUQuota={budget['cpu_quota']}%",
