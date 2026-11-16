@@ -173,34 +173,78 @@ class PiecesTest(unittest.TestCase):
     def test_judge(self):
         budget = {"ram": 4 * GIB, "vram": 2 * GIB, "cpu_quota": 360, "max_temp": 80}
         good = {"ram_peak": 3 * GIB, "vram_peak": GIB, "cpu_cores_avg": 2.5, "gpu_temp_max": 70}
-        self.assertTrue(all(row[3] for row in monitor.judge(good, budget)))
+        rows = monitor.judge(good, budget)
+        self.assertEqual([row[0] for row in rows], ["RAM", "VRAM", "CPU cores", "Temperature"])
+        self.assertTrue(all(row[3] is True for row in rows))
+        self.assertEqual(monitor.verdict(rows), 0)
         bad = {"ram_peak": 3 * GIB, "cgroup_peak": 5 * GIB, "vram_peak": 3 * GIB,
                "cpu_cores_avg": 5.0, "gpu_temp_max": 91}
-        self.assertFalse(any(row[3] for row in monitor.judge(bad, budget)))
+        self.assertTrue(all(row[3] is False for row in monitor.judge(bad, budget)))
+        self.assertEqual(monitor.verdict(monitor.judge(bad, budget)), 2)
         rows = actions.describe_checks(monitor.judge(bad, budget))
         self.assertEqual(rows[0][:2], ("RAM", "5.00 GiB"))
         self.assertEqual(rows[0][4], "OVER")
 
+    def test_missing_readings_are_never_a_pass(self):
+        """A run where the process or the GPU could not be read must not look like success."""
+        budget = {"ram": 4 * GIB, "vram": 2 * GIB, "cpu_quota": 360, "max_temp": 80}
+        blind = monitor.Sampler(None).summary(0)
+        self.assertIsNone(blind["ram_peak"])
+        self.assertIsNone(blind["vram_peak"])
+        rows = monitor.judge(blind, budget)
+        self.assertEqual([row[3] for row in rows], [None, None, None, None])
+        self.assertEqual(monitor.verdict(rows), 3)
+        self.assertEqual({row[4] for row in actions.describe_checks(rows)}, {"NOT MEASURED"})
+        partly = {"ram_peak": GIB, "vram_peak": None, "cpu_cores_avg": 1.0, "gpu_temp_max": None}
+        self.assertEqual(monitor.verdict(monitor.judge(partly, budget)), 3)
+        over_and_blind = {"ram_peak": 9 * GIB, "vram_peak": None, "cpu_cores_avg": None}
+        self.assertEqual(monitor.verdict(monitor.judge(over_and_blind, budget)), 2)
+        # A cage reading alone does not stand in for the process reading.
+        self.assertIsNone(monitor.judge({"cgroup_peak": GIB}, budget)[0][3])
+
+    def test_no_vram_row_on_a_machine_without_a_gpu(self):
+        budget = {"ram": 4 * GIB, "vram": 0, "cpu_quota": 360}
+        rows = monitor.judge({"ram_peak": GIB, "cpu_cores_avg": 1.0}, budget, gpu_expected=False)
+        self.assertEqual([row[0] for row in rows], ["RAM", "CPU cores"])
+        self.assertEqual(monitor.verdict(rows), 0)
+
     def test_sampler_summary(self):
         sampler = monitor.Sampler(1)
+
         def gpu(used):
             return {"used": used * MIB, "utilization": 50.0, "temperature": 60.0}
 
-        sampler.samples = [
+        for sample in (
             {"time": 0.0, "gpu": gpu(300), "cpu_temp": None},
             {"time": 1.0, "gpu": gpu(1500), "cpu_temp": None, "VmRSS": 2 * GIB, "RssAnon": GIB,
-             "RssFile": GIB, "RssShmem": 0, "cpu_seconds": 10.0},
+             "RssFile": GIB, "RssShmem": 0, "cpu_seconds": 10.0, "disk_read": 100 * MIB},
             {"time": 2.0, "gpu": gpu(1800), "cpu_temp": None, "VmRSS": 3 * GIB, "RssAnon": GIB,
-             "RssFile": 2 * GIB, "RssShmem": 0, "cpu_seconds": 13.0},
+             "RssFile": 2 * GIB, "RssShmem": 0, "cpu_seconds": 13.0, "disk_read": 400 * MIB},
             {"time": 3.0, "gpu": gpu(1700), "cpu_temp": None, "VmRSS": 2 * GIB, "RssAnon": GIB,
-             "RssFile": GIB, "RssShmem": 0, "cpu_seconds": 15.0},
-        ]
+             "RssFile": GIB, "RssShmem": 0, "cpu_seconds": 15.0, "disk_read": 900 * MIB},
+        ):
+            sampler.record(sample)
         summary = sampler.summary(300 * MIB, since=1.0)
         self.assertEqual(summary["ram_peak"], 3 * GIB)
         self.assertEqual(summary["ram_private"] + summary["ram_model_pages"], 3 * GIB)
         self.assertEqual(summary["vram_peak"], 1500 * MIB)
         self.assertEqual(summary["cpu_cores_avg"], 2.5)
         self.assertEqual(summary["cpu_cores_peak"], 3.0)
+        self.assertEqual(summary["disk_read_bytes"], 800 * MIB)
+        self.assertEqual((summary["process_samples"], summary["gpu_samples"]), (3, 4))
+
+    def test_sampler_history_is_bounded_but_peaks_survive(self):
+        sampler = monitor.Sampler(1)
+        sampler.record({"time": 0.0, "gpu": {"used": 5 * GIB, "utilization": 90.0, "temperature": 88.0},
+                        "cpu_temp": None, "VmRSS": 7 * GIB, "RssAnon": 7 * GIB, "cpu_seconds": 0.0})
+        for index in range(1, monitor.MAX_SAMPLES * 2):
+            sampler.record({"time": float(index), "gpu": None, "cpu_temp": None,
+                            "VmRSS": GIB, "RssAnon": GIB, "cpu_seconds": float(index)})
+        self.assertEqual(len(sampler.samples), monitor.MAX_SAMPLES)
+        summary = sampler.summary(0)
+        self.assertEqual(summary["ram_peak"], 7 * GIB)        # from a sample long since dropped
+        self.assertEqual(summary["vram_peak"], 5 * GIB)
+        self.assertEqual(summary["gpu_temp_max"], 88.0)
 
     def test_split_model_cannot_go_to_ollama(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -221,55 +265,143 @@ class PiecesTest(unittest.TestCase):
             with self.assertRaises(actions.ActionError):
                 actions.modelfile_for(sources.resolve(path), {"num_gpu": 0})
 
+    def tuning(self, folder, measurements, layers=8, start_gpu=4, status=None, rounds=None):
+        """Run the tuning loop against scripted measurements; returns (plan, result, calls)."""
+        source = sources.resolve(fakegguf.language_model(os.path.join(folder, "m.gguf"), layers=layers))
+        hw = {"logical_cpus": 12, "ram_total": 16 * GIB, "vram_total": 6 * GIB}
+        plan = planner.plan(source.model, planner.make_budget(hw, 30))
+        plan["settings"]["num_gpu"] = start_gpu
+        if status:
+            plan["status"] = status
+        calls, creations = [], []
+
+        def fake_bench(name, budget, tokens=64, **_):
+            settings = dict(plan["settings"])
+            calls.append(settings)
+            measured = measurements(settings, plan, actions.layer_cost(source, settings))
+            return {"measured": measured, "checks": monitor.judge(measured, budget),
+                    "installed": creations[-1]}
+
+        def fake_create(name, path, **_):
+            with open(path) as handle:
+                creations.append(handle.read())
+
+        with mock.patch.object(actions, "bench_ollama", fake_bench), \
+                mock.patch.object(ollama, "create", fake_create), \
+                mock.patch.object(actions, "MAX_TUNE_ROUNDS", rounds or actions.MAX_TUNE_ROUNDS):
+            result = actions.apply(source, plan, "tiny-shu", os.path.join(folder, "out"),
+                                   verify=True, report=lambda message: None)
+        return plan, result, calls
+
     def test_tuning_steps_back_after_overshoot(self):
-        """The loop grows once, overshoots, and settles on the measured in-budget count."""
-        with tempfile.TemporaryDirectory() as folder:
-            source = sources.resolve(fakegguf.language_model(os.path.join(folder, "m.gguf"),
-                                                             layers=8, layer_bytes=64 * MIB // 1024))
-            hw = {"logical_cpus": 12, "ram_total": 16 * GIB, "vram_total": 6 * GIB}
-            plan = planner.plan(source.model, planner.make_budget(hw, 30))
-            plan["settings"]["num_gpu"] = 4
-            step = actions.layer_cost(source, plan["settings"])
+        """The loop grows once, overshoots, and settles on a measured in-budget count."""
+        def measurements(settings, plan, step):
             budget = plan["budget"]["vram"]
             usage = {4: int(budget * actions.GROW_TARGET) - 2 * step - 1, 6: budget + 1,
                      5: budget - step // 2}
-            calls = []
+            return {"ram_peak": GIB, "vram_peak": usage[settings["num_gpu"]], "cpu_cores_avg": 1.0}
 
-            def fake_bench(name, bench_budget, tokens=64, **_):
-                layers = plan["settings"]["num_gpu"]
-                calls.append(layers)
-                return {"measured": {"vram_peak": usage[layers]}, "checks": []}
-
-            with mock.patch.object(actions, "bench_ollama", fake_bench), \
-                    mock.patch.object(ollama, "create", lambda *a, **k: None):
-                result = actions.apply(source, plan, "tiny-shu", os.path.join(folder, "out"),
-                                       verify=True, report=lambda message: None)
-            self.assertEqual(calls, [4, 6, 5])
+        with tempfile.TemporaryDirectory() as folder:
+            plan, result, calls = self.tuning(folder, measurements)
+            self.assertEqual([call["num_gpu"] for call in calls], [4, 6, 5])
             self.assertEqual(plan["settings"]["num_gpu"], 5)
             self.assertEqual(result["rounds"][-1]["num_gpu"], 5)
+            self.assertTrue(result["verified"])
             with open(os.path.join(folder, "out", "Modelfile")) as handle:
                 self.assertIn("PARAMETER num_gpu 5", handle.read())
 
     def test_tuning_leaves_headroom_instead_of_filling_the_last_megabytes(self):
+        def measurements(settings, plan, step):
+            return {"ram_peak": GIB, "vram_peak": plan["budget"]["vram"] - step - 1, "cpu_cores_avg": 1.0}
+
         with tempfile.TemporaryDirectory() as folder:
-            source = sources.resolve(fakegguf.language_model(os.path.join(folder, "m.gguf"), layers=8))
-            hw = {"logical_cpus": 12, "ram_total": 16 * GIB, "vram_total": 6 * GIB}
-            plan = planner.plan(source.model, planner.make_budget(hw, 30))
-            plan["settings"]["num_gpu"] = 4
-            step = actions.layer_cost(source, plan["settings"])
-            used = plan["budget"]["vram"] - step - 1    # one more layer fits, but only just
-            calls = []
-
-            def fake_bench(name, bench_budget, tokens=64, **_):
-                calls.append(plan["settings"]["num_gpu"])
-                return {"measured": {"vram_peak": used}, "checks": []}
-
-            with mock.patch.object(actions, "bench_ollama", fake_bench), \
-                    mock.patch.object(ollama, "create", lambda *a, **k: None):
-                actions.apply(source, plan, "tiny-shu", os.path.join(folder, "out"),
-                              verify=True, report=lambda message: None)
-            self.assertEqual(calls, [4])
+            plan, result, calls = self.tuning(folder, measurements)
+            self.assertEqual(len(calls), 1)
             self.assertEqual(plan["settings"]["num_gpu"], 4)
+            self.assertTrue(result["verified"])
+
+    def test_tuning_shrinks_batch_then_context_when_ram_is_over(self):
+        def measurements(settings, plan, step):
+            over = settings["num_ctx"] > 2048
+            return {"ram_peak": plan["budget"]["ram"] + (GIB if over else -GIB),
+                    "vram_peak": plan["budget"]["vram"] - 1, "cpu_cores_avg": 1.0}
+
+        with tempfile.TemporaryDirectory() as folder:
+            plan, result, calls = self.tuning(folder, measurements)
+            self.assertEqual([(c["num_batch"], c["num_ctx"]) for c in calls],
+                             [(512, 4096), (128, 4096), (128, 2048)])
+            self.assertTrue(result["verified"])
+            self.assertEqual(plan["settings"]["num_ctx"], 2048)
+
+    def test_tuning_does_not_fight_ram_it_cannot_win(self):
+        """Weights larger than the RAM budget are the cage's job; shrinking context is pointless."""
+        def measurements(settings, plan, step):
+            return {"ram_peak": plan["budget"]["ram"] + GIB, "vram_peak": plan["budget"]["vram"] - 1,
+                    "cpu_cores_avg": 1.0}
+
+        with tempfile.TemporaryDirectory() as folder:
+            plan, result, calls = self.tuning(folder, measurements, status="paged")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(plan["settings"]["num_ctx"], 4096)
+            self.assertFalse(result["verified"])
+
+    def test_tuning_drops_a_thread_when_cpu_is_over(self):
+        def measurements(settings, plan, step):
+            return {"ram_peak": GIB, "vram_peak": plan["budget"]["vram"] - 1,
+                    "cpu_cores_avg": settings["num_thread"] + 1.5}
+
+        with tempfile.TemporaryDirectory() as folder:
+            plan, result, calls = self.tuning(folder, measurements)
+            self.assertEqual([call["num_thread"] for call in calls], [3, 2])
+            self.assertTrue(result["verified"])
+
+    def test_the_installed_settings_are_always_the_measured_ones(self):
+        """Even when the rounds run out, the last thing installed gets measured."""
+        def measurements(settings, plan, step):
+            over = settings["num_gpu"] > 1
+            return {"ram_peak": GIB, "vram_peak": plan["budget"]["vram"] + (1 if over else -step),
+                    "cpu_cores_avg": 1.0}
+
+        with tempfile.TemporaryDirectory() as folder:
+            plan, result, calls = self.tuning(folder, measurements, start_gpu=4, rounds=2)
+            self.assertEqual([call["num_gpu"] for call in calls], [4, 3, 2])
+            last = result["rounds"][-1]
+            self.assertEqual(last["settings"], plan["settings"])
+            self.assertIn(f"PARAMETER num_gpu {plan['settings']['num_gpu']}", last["installed"])
+            self.assertFalse(result["verified"])      # still over, and it says so
+
+    def test_estimates_follow_the_tuned_settings(self):
+        def measurements(settings, plan, step):
+            return {"ram_peak": GIB, "vram_peak": plan["budget"]["vram"] + step + 1, "cpu_cores_avg": 1.0} \
+                if settings["num_gpu"] > 2 else \
+                {"ram_peak": GIB, "vram_peak": plan["budget"]["vram"] - 1, "cpu_cores_avg": 1.0}
+
+        with tempfile.TemporaryDirectory() as folder:
+            plan, result, calls = self.tuning(folder, measurements)
+            with open(os.path.join(folder, "out", "plan.json")) as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved["layers"]["on_gpu"], plan["settings"]["num_gpu"])
+            fresh = planner.estimate(sources.resolve(saved["model_file"]).model,
+                                     plan["settings"]["num_gpu"], plan["settings"]["num_ctx"],
+                                     plan["settings"]["num_batch"])
+            self.assertEqual(saved["estimate"]["vram"], fresh["vram"])
+
+    def test_other_ollama_models_are_not_unloaded_without_permission(self):
+        unloaded = []
+        loaded = [{"name": "someone-elses:latest"}, {"name": "mine:latest"}]
+        with mock.patch.object(ollama, "available", lambda: True), \
+                mock.patch.object(ollama, "running", lambda: loaded), \
+                mock.patch.object(ollama, "unload", unloaded.append):
+            with self.assertRaises(actions.ActionError) as caught:
+                actions.clear_ollama("mine")
+            self.assertIn("someone-elses:latest", str(caught.exception))
+            self.assertEqual(unloaded, [])
+            actions.clear_ollama("mine", unload_others=True)
+            self.assertEqual(unloaded, ["someone-elses:latest", "mine:latest"])
+            del unloaded[:]
+            loaded.pop(0)
+            actions.clear_ollama("mine")          # only the model under test: no permission needed
+            self.assertEqual(unloaded, ["mine:latest"])
 
 
 if __name__ == "__main__":

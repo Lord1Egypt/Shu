@@ -2,8 +2,11 @@
 
 import glob
 import os
+import random
 import shutil
 import subprocess
+import threading
+import time
 
 MIB = 1024 * 1024
 GIB = 1024 * MIB
@@ -165,6 +168,50 @@ def detect():
         "llama_server": find_engine("llama-server")[0],
         "llama_quantize": find_engine("llama-quantize")[0],
     }
+
+
+def read_speed(path, extent=32 * MIB, readers=4):
+    """Measured rate, in bytes per second, at which uncached stretches of ``path`` are read.
+
+    A paged model is swept layer by layer by several threads, so the probe reads a few long
+    stretches at random places in parallel. Only those stretches are dropped from the page
+    cache first; the rest of a cached model stays cached. Returns None when the file is too
+    small or cannot be probed. Disk caches make the figure vary from one probe to the next.
+    """
+    try:
+        size = os.path.getsize(path)
+        if size < extent * readers * 2:
+            return None
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return None
+    failed = []
+
+    def sweep(offset):
+        try:
+            done = 0
+            while done < extent:
+                done += len(os.pread(descriptor, MIB, offset + done)) or extent
+        except OSError as error:
+            failed.append(error)
+
+    try:
+        # Fresh random places every time: a repeated probe would only measure a cache.
+        offsets = [random.randrange(0, size - extent) // 4096 * 4096 for _ in range(readers)]
+        for offset in offsets:
+            os.posix_fadvise(descriptor, offset, extent, os.POSIX_FADV_DONTNEED)
+        workers = [threading.Thread(target=sweep, args=(offset,)) for offset in offsets]
+        started = time.monotonic()
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        elapsed = time.monotonic() - started
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    return extent * readers / elapsed if elapsed > 0 and not failed else None
 
 
 def fmt_bytes(value):

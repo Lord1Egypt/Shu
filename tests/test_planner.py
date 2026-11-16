@@ -109,6 +109,42 @@ class PlanTest(unittest.TestCase):
         self.assertTrue(any("s per token" in note for note in plan["notes"]))
         self.assertTrue(any("shu serve" in note for note in plan["notes"]))
 
+    def test_paging_estimate_uses_the_measured_disk(self):
+        big = Shape(layers=80, layer_bytes=500 * MIB, input_bytes=1 * GIB, embd=8192,
+                    kv_width=2048, parameters=70_000_000_000)
+        budget = planner.make_budget(HW, 30)
+        assumed = planner.plan(big, budget)
+        self.assertFalse(assumed["estimate"]["disk_speed_measured"])
+        self.assertTrue(any("not measured" in note for note in assumed["notes"]))
+        measured = planner.plan(big, budget, disk_speed=1000 * MIB)
+        self.assertTrue(measured["estimate"]["disk_speed_measured"])
+        self.assertTrue(any("just measured 1000 MiB/s" in note for note in measured["notes"]))
+        paged = measured["estimate"]["paged_bytes"]
+        self.assertAlmostEqual(measured["estimate"]["paged_tokens_per_second"],
+                               1000 * MIB / paged, places=3)
+
+    def test_every_cpu_layer_is_reread_once_they_stop_fitting(self):
+        """Measured: 2.2 GiB of CPU-side layers in a 2 GiB cage read 2.17 GiB per token."""
+        model = Shape(layers=42, layer_bytes=55 * MIB, input_bytes=525 * MIB, embd=2560,
+                      kv_width=1024, parameters=7_500_000_000)
+        plan = planner.plan(model, planner.make_budget(HW, 30, ram_gb=2, vram_gb=1, cpu=3))
+        self.assertEqual(plan["status"], "paged")
+        cpu_layers = 42 - (plan["settings"]["num_gpu"] - 1)
+        self.assertEqual(plan["estimate"]["paged_bytes"], cpu_layers * 55 * MIB)
+
+    def test_refresh_follows_changed_settings(self):
+        shape = Shape()
+        plan = planner.plan(shape, planner.make_budget(HW, 30))
+        before = dict(plan["estimate"])
+        plan["settings"]["num_gpu"] -= 3
+        plan["settings"]["num_ctx"] = 2048
+        planner.refresh(plan, shape)
+        self.assertLess(plan["estimate"]["vram"], before["vram"])
+        self.assertGreater(plan["estimate"]["ram_weights"], before["ram_weights"])
+        self.assertEqual(plan["layers"]["on_gpu"], plan["settings"]["num_gpu"])
+        expected = planner.estimate(shape, plan["settings"]["num_gpu"], 2048, plan["settings"]["num_batch"])
+        self.assertEqual(plan["estimate"]["vram"], expected["vram"])
+
     def test_recommends_a_quantization_when_one_fits(self):
         model = Shape(layers=32, layer_bytes=200 * MIB, input_bytes=300 * MIB,
                       parameters=7_000_000_000)

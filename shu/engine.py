@@ -5,6 +5,7 @@ limits, so a model larger than the RAM budget is paged from disk instead of
 growing past it. No root is needed.
 """
 
+import ctypes
 import glob
 import json
 import os
@@ -19,6 +20,8 @@ import urllib.request
 from . import hardware
 
 RESUME_MARGIN = 5.0          # degrees below the limit at which a paused server resumes
+SENSOR_PATIENCE = 5          # consecutive failed readings before the guard pauses the engine
+PR_SET_PDEATHSIG = 1
 
 
 class EngineError(RuntimeError):
@@ -77,10 +80,24 @@ def cage_prefix(budget, unit):
     ]
 
 
+def _die_with_parent():
+    """Runs in the child before exec: the engine is terminated if Shu itself dies."""
+    ctypes.CDLL(None).prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+
+
+def _read(path):
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except OSError:
+        return None
+
+
 class Server:
     """A llama.cpp server process, caged when the system allows it."""
 
-    def __init__(self, model_path, settings, budget, projector=None, port=None, log_path=None):
+    def __init__(self, model_path, settings, budget, projector=None, port=None, log_path=None,
+                 report=None):
         binary, lib_dir = hardware.find_engine("llama-server")
         if not binary:
             raise EngineError(
@@ -96,8 +113,12 @@ class Server:
             self.command = cage_prefix(budget, self.unit) + self.command
         self.environment = engine_environment(lib_dir)
         self.log_path = log_path
+        self.report = report or (lambda message: None)
         self.process = None
         self.pauses = 0
+        self.sensor_failures = 0
+        self.paused = False
+        self._cgroup = None
         self._guard = None
         self._guard_stop = threading.Event()
 
@@ -108,32 +129,72 @@ class Server:
     @property
     def cgroup(self):
         """Filesystem path of the cage, or None when running uncaged."""
+        if self._cgroup and os.path.isdir(self._cgroup):
+            return self._cgroup
         if not self.caged or not self.process:
             return None
-        try:
-            with open(f"/proc/{self.process.pid}/cgroup") as handle:
-                relative = handle.read().strip().split("::", 1)[1]
-        except (OSError, IndexError):
-            return None
+        relative = (_read(f"/proc/{self.process.pid}/cgroup") or "").partition("::")[2]
         path = "/sys/fs/cgroup" + relative
-        return path if self.unit in path and os.path.isdir(path) else None
+        if relative and self.unit in path and os.path.isdir(path):
+            self._cgroup = path
+            return path
+        return None
+
+    def enforcement(self):
+        """What the kernel is really holding the engine to, read back from the cage."""
+        cage = self.cgroup
+        limits = {"caged": bool(cage), "ram_hard": False, "cpu_hard": False}
+        if not cage:
+            return limits
+        memory_max = _read(os.path.join(cage, "memory.max"))
+        cpu_max = (_read(os.path.join(cage, "cpu.max")) or "").split()
+        limits["ram_hard"] = bool(memory_max and memory_max.isdigit()
+                                  and int(memory_max) <= self.budget["ram"])
+        if len(cpu_max) == 2 and cpu_max[0].isdigit() and cpu_max[1].isdigit():
+            limits["cpu_hard"] = int(cpu_max[0]) / int(cpu_max[1]) <= self.budget["cpu_quota"] / 100 + 0.01
+        return limits
+
+    def oom_kills(self):
+        """Times the kernel killed something in the cage for exceeding the RAM limit."""
+        cage = self.cgroup
+        for line in (_read(os.path.join(cage, "memory.events")) or "").splitlines() if cage else ():
+            key, _, value = line.partition(" ")
+            if key == "oom_kill" and value.isdigit():
+                return int(value)
+        return 0
+
+    def _failure(self, what):
+        if self.oom_kills():
+            return EngineError(
+                f"{what}: the kernel stopped the engine because its working memory "
+                f"(not the model pages) passed the RAM budget. Use a smaller --ctx or a larger --ram."
+            )
+        return EngineError(what + (f"; see {self.log_path}" if self.log_path
+                                   else "; rerun with --log FILE for details"))
 
     def start(self, ready_timeout=1800):
+        """Launch the engine and wait until it can serve; the thermal guard runs from the first second."""
+        max_temp = self.budget.get("max_temp")
+        if max_temp and not any(value is not None for value in hardware.temperatures().values()):
+            raise EngineError(
+                "--max-temp was given but this machine exposes no temperature sensor, "
+                "so the thermal guard cannot work. Remove --max-temp to run without it."
+            )
         log = open(self.log_path, "w") if self.log_path else subprocess.DEVNULL
         try:
-            self.process = subprocess.Popen(self.command, env=self.environment,
-                                            stdout=log, stderr=subprocess.STDOUT)
+            self.process = subprocess.Popen(self.command, env=self.environment, stdout=log,
+                                            stderr=subprocess.STDOUT, preexec_fn=_die_with_parent)
         finally:
             if self.log_path:
                 log.close()
         try:
+            if max_temp:
+                self._start_guard(max_temp)
             deadline = time.monotonic() + ready_timeout
             while time.monotonic() < deadline:
                 if self.process.poll() is not None:
-                    raise EngineError(
-                        f"llama-server exited with code {self.process.returncode} while loading"
-                        + (f"; see {self.log_path}" if self.log_path else "; rerun with --log FILE for details")
-                    )
+                    raise self._failure(
+                        f"llama-server exited with code {self.process.returncode} while loading")
                 try:
                     with urllib.request.urlopen(self.url + "/health", timeout=5) as response:
                         if response.status == 200:
@@ -154,46 +215,81 @@ class Server:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read())
-        except (urllib.error.URLError, OSError) as error:
-            raise EngineError(f"completion request failed: {error}") from error
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            raise self._failure(f"completion request failed ({error})") from error
 
-    def start_guard(self, max_temp, interval=2.0, report=None):
-        """Pause the server while a sensor is at or above ``max_temp`` degrees Celsius."""
+    def _pause(self):
+        """Freeze every process in the cage; without a cage, stop the engine process itself."""
+        cage = self.cgroup
+        if cage:
+            try:
+                with open(os.path.join(cage, "cgroup.freeze"), "w") as handle:
+                    handle.write("1")
+                self.paused = True
+                return
+            except OSError:
+                pass
+        os.kill(self.process.pid, signal.SIGSTOP)
+        self.paused = True
+
+    def _resume(self):
+        cage = self.cgroup
+        if cage:
+            try:
+                with open(os.path.join(cage, "cgroup.freeze"), "w") as handle:
+                    handle.write("0")
+            except OSError:
+                pass
+        if self.process.poll() is None:
+            os.kill(self.process.pid, signal.SIGCONT)
+        self.paused = False
+
+    def _start_guard(self, max_temp, interval=2.0):
+        """Pause the engine while a sensor is at or above ``max_temp``, or while no sensor answers."""
         def loop():
-            paused = False
+            blind = 0
             while not self._guard_stop.wait(interval):
                 if self.process.poll() is not None:
                     return
                 readings = [value for value in hardware.temperatures().values() if value is not None]
                 if not readings:
+                    blind += 1
+                    self.sensor_failures += 1
+                    if blind == SENSOR_PATIENCE and not self.paused:
+                        self._pause()
+                        self.pauses += 1
+                        self.report("temperature sensors stopped answering: paused until they return")
                     continue
+                blind = 0
                 hottest = max(readings)
-                if not paused and hottest >= max_temp:
-                    os.kill(self.process.pid, signal.SIGSTOP)
-                    paused = True
+                if not self.paused and hottest >= max_temp:
+                    self._pause()
                     self.pauses += 1
-                    if report:
-                        report(f"{hottest:.0f} C reached the {max_temp:.0f} C limit: paused")
-                elif paused and hottest <= max_temp - RESUME_MARGIN:
-                    os.kill(self.process.pid, signal.SIGCONT)
-                    paused = False
-                    if report:
-                        report(f"cooled to {hottest:.0f} C: resumed")
-            if paused and self.process.poll() is None:
-                os.kill(self.process.pid, signal.SIGCONT)
+                    self.report(f"{hottest:.0f} C reached the {max_temp:.0f} C limit: paused")
+                elif self.paused and hottest <= max_temp - RESUME_MARGIN:
+                    self._resume()
+                    self.report(f"cooled to {hottest:.0f} C: resumed")
 
         self._guard = threading.Thread(target=loop, daemon=True)
         self._guard.start()
 
     def stop(self):
+        """Stop the guard and the engine, then make sure nothing is left alive in the cage."""
         self._guard_stop.set()
         if self._guard:
             self._guard.join(timeout=10)
+        cage = self.cgroup
         if self.process and self.process.poll() is None:
-            os.kill(self.process.pid, signal.SIGCONT)
+            self._resume()
             self.process.terminate()
             try:
                 self.process.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
+        if cage and os.path.isdir(cage) and _read(os.path.join(cage, "cgroup.procs")):
+            try:
+                with open(os.path.join(cage, "cgroup.kill"), "w") as handle:
+                    handle.write("1")
+            except OSError:
+                pass

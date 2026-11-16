@@ -16,7 +16,7 @@ KV_BYTES = 2                     # f16 KV cache
 MIN_CONTEXT = 1024
 DEFAULT_CONTEXT = 4096
 DEFAULT_BATCH = 512
-ASSUMED_DISK_SPEED = 500 * MIB   # bytes per second, used only for the paging estimate
+ASSUMED_DISK_SPEED = 200 * MIB   # bytes per second; only used when the disk cannot be probed
 
 # Quantization ladder that llama-quantize can produce without an importance matrix.
 QUANT_LADDER = (
@@ -135,8 +135,23 @@ def _recommend(model, budget, working, kv_total):
     return result
 
 
-def plan(model, budget, projector_bytes=0):
-    """Return the settings, the memory estimate and a verdict for one model and budget."""
+def refresh(plan, model, projector_bytes=0):
+    """Recompute a plan's memory estimate after its settings were changed by tuning."""
+    settings = plan["settings"]
+    numbers = estimate(model, settings["num_gpu"], settings["num_ctx"], settings["num_batch"],
+                       projector_bytes)
+    plan["estimate"].update(vram=numbers["vram"], ram_working=numbers["ram_working"],
+                            ram_weights=numbers["cpu_weights"], ram_resident=numbers["ram_resident"])
+    plan["layers"]["on_gpu"] = settings["num_gpu"]
+    return plan
+
+
+def plan(model, budget, projector_bytes=0, disk_speed=None):
+    """Return the settings, the memory estimate and a verdict for one model and budget.
+
+    ``disk_speed`` is the measured read rate of the model's disk in bytes per second; without
+    it the paging estimate falls back to an assumption and says so.
+    """
     if not model.is_language_model:
         raise ValueError(f"{model.path} holds no language-model layers (it may be a projector file)")
     total = len(model.layer_bytes)
@@ -190,9 +205,12 @@ def plan(model, budget, projector_bytes=0):
         if batch < batch_wanted:
             notes.append(f"Batch reduced from {batch_wanted} to {batch} to shrink compute buffers.")
 
+    # Layers are swept in order for every token. Once they no longer fit beside the working
+    # memory, the page cache stops helping: each token re-reads all of them (measured: a 5 GiB
+    # model with 2.2 GiB of CPU-side layers in a 2 GiB cage read 2.17 GiB per token).
     paged = 0
-    if status == "paged":
-        paged = max(0, numbers["ram_working"] + numbers["cpu_hot"] - budget["ram"])
+    if status == "paged" and numbers["ram_working"] + numbers["cpu_hot"] > budget["ram"]:
+        paged = numbers["cpu_hot"]
     result = {
         "status": status,
         "verdict": STATUS_TEXT[status],
@@ -221,14 +239,18 @@ def plan(model, budget, projector_bytes=0):
         )
         notes.append("Only a caged engine (`shu serve`) can hold RAM to the budget in this mode.")
     elif status == "paged":
-        speed = ASSUMED_DISK_SPEED / paged
-        result["estimate"]["paged_tokens_per_second"] = round(speed, 3)
+        speed = disk_speed or ASSUMED_DISK_SPEED
+        seconds = paged / speed
+        basis = (f"this disk just measured {speed / MIB:.0f} MiB/s" if disk_speed
+                 else f"assuming a {ASSUMED_DISK_SPEED // MIB} MiB/s disk, not measured")
+        result["estimate"]["disk_speed"] = int(speed)
+        result["estimate"]["disk_speed_measured"] = bool(disk_speed)
+        result["estimate"]["paged_tokens_per_second"] = round(1 / seconds, 4)
+        pace = f"{seconds:.0f} s per token" if seconds >= 1.5 else f"{1 / seconds:.1f} tokens/s"
         notes.append(
-            f"{fmt_bytes(paged)} of weights do not fit in the RAM budget and are re-read from disk "
-            f"for every token: roughly {1 / speed:.0f} s per token on a 500 MB/s disk."
-            if speed < 1 else
-            f"{fmt_bytes(paged)} of weights do not fit in the RAM budget and are re-read from disk "
-            f"for every token: roughly {speed:.1f} tokens/s on a 500 MB/s disk."
+            f"{fmt_bytes(paged)} of layers do not fit in the RAM budget and are re-read from disk "
+            f"for every token: about {pace} ({basis}). Disk caches make this vary; "
+            f"`shu bench` measures the real figure."
         )
         notes.append("Only a caged engine (`shu serve`) can hold RAM to the budget in this mode.")
     if status in ("paged", "impossible"):

@@ -63,6 +63,16 @@ def budget_from(args, hw):
                                cpu=args.cpu, ctx=args.ctx, batch=args.batch, max_temp=args.max_temp)
 
 
+def make_plan(source, budget, projector_bytes):
+    """Plan a model; when it will page from disk, time that disk instead of assuming a speed."""
+    plan = planner.plan(source.model, budget, projector_bytes)
+    if plan["status"] == "paged" and plan["estimate"]["paged_bytes"]:
+        speed = hardware.read_speed(source.model.path)
+        if speed:
+            plan = planner.plan(source.model, budget, projector_bytes, disk_speed=speed)
+    return plan
+
+
 def planned(args):
     """Resolve the model and compute its plan from the command line."""
     hw = hardware.detect()
@@ -73,8 +83,7 @@ def planned(args):
             f"shu convert {args.model} --quant Q4_K_M"
         )
     projector = 0 if args.text_only else source.projector_bytes
-    plan = planner.plan(source.model, budget_from(args, hw), projector)
-    return hw, source, plan
+    return hw, source, make_plan(source, budget_from(args, hw), projector)
 
 
 def print_hardware(hw):
@@ -134,23 +143,36 @@ def print_plan(plan):
 
 
 def print_bench(bench):
-    measured = bench["measured"]
+    measured, limits = bench["measured"], bench.get("limits", {})
     print(f"  Engine: {bench['engine']}    load {bench['load_seconds']} s    "
           f"{bench['tokens']} tokens at {bench['tokens_per_second'] or '?'} tokens/s")
-    rows = actions.describe_checks(bench["checks"])
-    _table([(label, used, limit, share, _color(state, "32" if state == "PASS" else "31"))
-            for label, used, limit, share, state in rows],
+    colors = {"PASS": "32", "OVER": "31", "NOT MEASURED": "33"}
+    _table([(label, used, limit, share, _color(state, colors[state]))
+            for label, used, limit, share, state in actions.describe_checks(bench["checks"])],
            header=("Resource", "Measured", "Budget", "Of budget", "Result"))
-    detail = [f"process memory at its peak: {fmt_bytes(measured['ram_private'])} private + "
-              f"{fmt_bytes(measured['ram_model_pages'])} model pages (reclaimable page cache)"]
+    detail = []
+    if limits.get("ram_hard") and limits.get("cpu_hard"):
+        detail.append("RAM and CPU limits are enforced by the kernel (read back from the cage)")
+    else:
+        soft = [name for name, key in (("RAM", "ram_hard"), ("CPU", "cpu_hard")) if not limits.get(key)]
+        detail.append(f"{' and '.join(soft)} not enforced by the kernel here: bounded by the "
+                      "settings only, so the measurement above is the evidence")
+    if measured.get("ram_peak") is not None:
+        detail.append(f"process memory at its peak: {fmt_bytes(measured['ram_private'])} private + "
+                      f"{fmt_bytes(measured['ram_model_pages'])} model pages (reclaimable page cache)")
     if measured.get("cgroup_peak"):
-        detail.append(f"the cage was charged {fmt_bytes(measured['cgroup_peak'])} at its peak "
-                      "(the kernel cannot let it pass the RAM budget)")
+        detail.append(f"the cage was charged {fmt_bytes(measured['cgroup_peak'])} at its peak")
+    if bench.get("disk_read_per_token"):
+        detail.append(f"read {fmt_bytes(bench['disk_read_per_token'])} from disk per generated token")
     if measured.get("gpu_temp_max") is not None:
         detail.append(f"GPU peaked at {measured['gpu_temp_max']:.0f} C, "
                       f"average utilization {measured['gpu_util_avg']}%")
     if bench.get("thermal_pauses"):
         detail.append(f"thermal guard paused the engine {bench['thermal_pauses']} time(s)")
+    if bench.get("sensor_failures"):
+        detail.append(f"temperature sensors failed to answer {bench['sensor_failures']} time(s)")
+    if bench.get("exit_code") == 3:
+        detail.append("some values could not be measured, so this run does NOT confirm the budget")
     for line in detail:
         print("  - " + line)
 
@@ -194,6 +216,7 @@ def cmd_apply(args):
         print()
     result = actions.apply(source, plan, name, out_dir, text_only=args.text_only,
                            create=not args.no_create, verify=args.verify, tokens=args.tokens,
+                           unload_others=args.unload_others,
                            report=(lambda message: None) if quiet else (lambda m: print("  " + m)))
     if quiet:
         print(json.dumps({"plan": plan, **result}, indent=2, default=str))
@@ -204,6 +227,9 @@ def cmd_apply(args):
     if result["rounds"]:
         print()
         print_bench(result["rounds"][-1])
+        print("  " + (_color("Verified: the installed settings were measured inside the budget.", "32")
+                      if result["verified"] else
+                      _color("Not verified: the installed settings did not measure inside the budget.", "31")))
     if plan["status"] == "paged":
         print(f"  This model is larger than the RAM budget. For a kernel-enforced limit run: "
               f"shu serve {args.model} --percent {args.percent:g}")
@@ -215,14 +241,16 @@ def cmd_bench(args):
     if args.engine == "ollama":
         if source.kind != "ollama":
             raise sources.SourceError("--engine ollama needs an Ollama model name")
-        bench = actions.bench_ollama(args.model, plan["budget"], tokens=args.tokens)
+        bench = actions.bench_ollama(args.model, plan["budget"], tokens=args.tokens,
+                                     unload_others=args.unload_others)
     else:
         bench = actions.bench_llama(
             source, plan, tokens=args.tokens,
             with_projector=bool(source.projectors) and not args.text_only, log_path=args.log,
+            unload_others=args.unload_others,
             report=None if args.json else (lambda message: print("  " + message)))
     _emit(args, bench, lambda: print_bench(bench))
-    return 0 if all(check[3] for check in bench["checks"]) else 2
+    return bench["exit_code"]
 
 
 def _interrupt(signum, frame):
@@ -241,21 +269,21 @@ def cmd_serve(args):
         actions.evict_from_page_cache(source.model.path)
     projector = source.projectors[0].path if source.projectors and not args.text_only else None
     server = engine.Server(source.model.path, plan["settings"], budget, projector=projector,
-                           port=args.port, log_path=args.log)
-    print(f"  Loading {source.model.name} ...")
+                           port=args.port, log_path=args.log,
+                           report=lambda message: print("  thermal guard: " + message))
+    print(f"  Loading {source.model.name} ..."
+          + (f" (thermal guard active from now: pauses at {budget['max_temp']:.0f} C)"
+             if budget.get("max_temp") else ""))
+    signal.signal(signal.SIGTERM, _interrupt)
     server.start()
-    if server.caged:
-        print(f"  Caged: RAM <= {fmt_bytes(budget['ram'])}, CPU <= {budget['cpu_quota'] / 100:.1f} cores "
-              "(enforced by the kernel)")
-    else:
-        print("  No cage available on this system: RAM and CPU limits are not enforced.")
-    if budget.get("max_temp"):
-        server.start_guard(budget["max_temp"], report=lambda message: print("  thermal guard: " + message))
-        print(f"  Thermal guard: pauses at {budget['max_temp']:.0f} C")
+    limits = server.enforcement()
+    for label, key, value in (("RAM", "ram_hard", fmt_bytes(budget["ram"])),
+                              ("CPU", "cpu_hard", f"{budget['cpu_quota'] / 100:.1f} cores")):
+        print(f"  {label} <= {value}: " + ("enforced by the kernel" if limits[key]
+                                           else "NOT enforced (no cage on this system); settings only"))
     print(f"  Ready: {_color(server.url, '36')}  (OpenAI-compatible API at {server.url}/v1). Ctrl+C stops it.")
     sampler = monitor.Sampler(server.process.pid, cgroup=server.cgroup, interval=2.0)
     sampler.start()
-    signal.signal(signal.SIGTERM, _interrupt)
     try:
         while server.process.poll() is None:
             time.sleep(1)
@@ -265,7 +293,8 @@ def cmd_serve(args):
         sampler.stop()
         server.stop()
     measured = sampler.summary(0)
-    print(f"\n  Stopped. Peak RAM {fmt_bytes(max(measured.get('cgroup_peak') or 0, measured['ram_peak']))}, "
+    peak = max(measured.get("cgroup_peak") or 0, measured.get("ram_peak") or 0)
+    print(f"\n  Stopped. Peak RAM {fmt_bytes(peak) if peak else 'not measured'}, "
           f"thermal pauses: {server.pauses}")
     return 0
 
@@ -381,7 +410,7 @@ def wizard():
                          "n").lower().startswith("y")
     budget = planner.make_budget(hw, percent=percent, ram_gb=ram, vram_gb=vram, cpu=cpu,
                                  ctx=ctx or None, max_temp=max_temp or None)
-    plan = planner.plan(source.model, budget, 0 if text_only else source.projector_bytes)
+    plan = make_plan(source, budget, 0 if text_only else source.projector_bytes)
     print()
     print_plan(plan)
 
@@ -396,7 +425,7 @@ def wizard():
                             quant=advice["quantization"], threads=budget["threads"])
             if ollama.available():
                 source = sources.resolve(name)
-                plan = planner.plan(source.model, budget, 0 if text_only else source.projector_bytes)
+                plan = make_plan(source, budget, 0 if text_only else source.projector_bytes)
                 print()
                 print_plan(plan)
 
@@ -418,11 +447,21 @@ def wizard():
     name = source.default_name()
     if action in ("verify", "create"):
         name = ollama.check_name(_ask("Name of the new Ollama model", name))
+    unload_others = False
+    if action in ("verify", "bench") and ollama.available():
+        busy = [entry["name"] for entry in ollama.running()]
+        if busy:
+            print(f"  Ollama has models loaded: {', '.join(busy)}. They would distort the measurement.")
+            if not _ask("Unload them now? (y/n)", "n").lower().startswith("y"):
+                print("  Nothing was changed. Run again when they are unloaded.")
+                return 0
+            unload_others = True
     out_dir = os.path.join("shu-out", name.replace("/", "_").replace(":", "_"))
     print()
     if action in ("verify", "create", "files"):
         result = actions.apply(source, plan, name, out_dir, text_only=text_only,
                                create=action != "files", verify=action == "verify",
+                               unload_others=unload_others,
                                report=lambda message: print("  " + message))
         print(f"  Wrote {', '.join(result['files'])} to {out_dir}")
         if result["created"]:
@@ -430,9 +469,13 @@ def wizard():
         if result["rounds"]:
             print()
             print_bench(result["rounds"][-1])
+            print("  Verified: the installed settings were measured inside the budget."
+                  if result["verified"] else
+                  "  Not verified: the installed settings did not measure inside the budget.")
     elif action == "bench":
         print("  Loading and measuring ...")
-        print_bench(actions.bench_llama(source, plan, with_projector=bool(source.projectors) and not text_only,
+        print_bench(actions.bench_llama(source, plan, unload_others=unload_others,
+                                        with_projector=bool(source.projectors) and not text_only,
                                         report=lambda m: print("  " + m)))
     elif action == "serve":
         arguments = ["serve", source.spec, "--percent", str(percent)]
@@ -477,12 +520,16 @@ def build_parser():
     sub.add_argument("--verify", action="store_true",
                      help="load the model, measure real usage and retune the GPU layers")
     sub.add_argument("--tokens", type=int, default=64, help="tokens to generate when verifying")
+    sub.add_argument("--unload-others", action="store_true",
+                     help="allow unloading other models Ollama has loaded, for a clean measurement")
 
     sub = command("bench", cmd_bench, "run a model once and compare real usage with the budget",
                   budget=True)
     sub.add_argument("--engine", choices=("llama", "ollama"), default="llama",
                      help="llama: caged llama.cpp server (default); ollama: an existing Ollama model")
     sub.add_argument("--tokens", type=int, default=64, help="tokens to generate")
+    sub.add_argument("--unload-others", action="store_true",
+                     help="allow unloading other models Ollama has loaded, for a clean measurement")
     sub.add_argument("--log", metavar="FILE", help="write the llama.cpp server log here")
 
     sub = command("serve", cmd_serve, "serve a model from a caged llama.cpp server", budget=True)

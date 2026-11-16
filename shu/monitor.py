@@ -1,5 +1,6 @@
 """Sample the RAM, CPU, VRAM and temperature a running model actually uses."""
 
+import collections
 import glob
 import os
 import threading
@@ -9,6 +10,8 @@ from . import hardware
 
 _TICKS = os.sysconf("SC_CLK_TCK")
 RUNNER_NAMES = ("llama-server", "ollama")
+CHARGE_SLACK = 4 * 1024 * 1024
+MAX_SAMPLES = 7200           # samples kept for CPU averages; peaks are tracked separately
 
 
 def _status(pid):
@@ -34,6 +37,18 @@ def _cpu_seconds(pid):
         return None
 
 
+def _disk_read_bytes(pid):
+    """Bytes the process has really fetched from storage (readable for our own processes only)."""
+    try:
+        with open(f"/proc/{pid}/io") as handle:
+            for line in handle:
+                if line.startswith("read_bytes:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def find_runner(model_path):
     """PID of the inference process that has ``model_path`` on its command line."""
     newest = None
@@ -52,15 +67,41 @@ def find_runner(model_path):
 
 
 class Sampler(threading.Thread):
-    """Background sampler; ``pid`` may be a PID or a callable that finds one later."""
+    """Background sampler; ``pid`` may be a PID or a callable that finds one later.
+
+    Peaks are folded into running totals, and only the newest ``MAX_SAMPLES`` samples are
+    kept, so a server that runs for days does not grow this object without bound.
+    """
 
     def __init__(self, pid, cgroup=None, interval=0.5):
         super().__init__(daemon=True)
         self._pid = pid
         self.cgroup = cgroup
         self.interval = interval
-        self.samples = []
+        self.samples = collections.deque(maxlen=MAX_SAMPLES)
+        self._top = {}
+        self._gpu_used = self._gpu_temp = self._cpu_temp = self._cgroup_seen = None
+        self._gpu_util_sum = 0.0
+        self.gpu_samples = self.process_samples = 0
         self._stop_event = threading.Event()
+
+    def record(self, sample):
+        """Fold one sample into the peaks and the bounded history."""
+        gpu = sample.get("gpu")
+        if gpu:
+            self.gpu_samples += 1
+            self._gpu_util_sum += gpu["utilization"]
+            self._gpu_used = max(self._gpu_used or 0, gpu["used"])
+            self._gpu_temp = max(self._gpu_temp or 0, gpu["temperature"])
+        if sample.get("cpu_temp"):
+            self._cpu_temp = max(self._cpu_temp or 0, sample["cpu_temp"])
+        if "VmRSS" in sample:
+            self.process_samples += 1
+            if sample["VmRSS"] >= self._top.get("VmRSS", 0):
+                self._top = sample
+        if sample.get("cgroup") is not None:
+            self._cgroup_seen = max(self._cgroup_seen or 0, sample["cgroup"])
+        self.samples.append(sample)
 
     def run(self):
         last_gpu, gpu = 0.0, None
@@ -79,36 +120,42 @@ class Sampler(threading.Thread):
                 if status:
                     sample.update(status)
                     sample["cpu_seconds"] = _cpu_seconds(pid)
+                    sample["disk_read"] = _disk_read_bytes(pid)
             if self.cgroup:
                 sample["cgroup"] = _read_int(os.path.join(self.cgroup, "memory.current"))
-            self.samples.append(sample)
+            self.record(sample)
             self._stop_event.wait(self.interval)
 
     def stop(self):
         self._stop_event.set()
-        self.join(timeout=10)
+        if self.is_alive():
+            self.join(timeout=10)
 
     def summary(self, baseline_vram, since=None):
-        """Peaks over the whole run; CPU usage only for samples after ``since``."""
-        process = [s for s in self.samples if "VmRSS" in s]
-        gpu = [s["gpu"] for s in self.samples if s.get("gpu")]
-        top = max(process, key=lambda s: s["VmRSS"], default={})
+        """Peaks over the whole run; CPU and disk figures only for samples after ``since``.
+
+        A value that could not be measured is None, never zero: a missing reading must not
+        look like a model that used nothing.
+        """
+        top = self._top
         result = {
-            "ram_peak": top.get("VmRSS", 0),
-            "ram_private": top.get("RssAnon", 0),
-            "ram_model_pages": top.get("RssFile", 0) + top.get("RssShmem", 0),
-            "vram_peak": max(0, max((g["used"] for g in gpu), default=0) - baseline_vram) if gpu else 0,
-            "gpu_util_avg": round(sum(g["utilization"] for g in gpu) / len(gpu), 1) if gpu else None,
-            "gpu_temp_max": max((g["temperature"] for g in gpu), default=None),
-            "cpu_temp_max": max((s["cpu_temp"] for s in self.samples if s.get("cpu_temp")), default=None),
+            "ram_peak": top.get("VmRSS"),
+            "ram_private": top.get("RssAnon"),
+            "ram_model_pages": (top.get("RssFile", 0) + top.get("RssShmem", 0)) if top else None,
+            "vram_peak": max(0, self._gpu_used - baseline_vram) if self._gpu_used is not None else None,
+            "gpu_util_avg": round(self._gpu_util_sum / self.gpu_samples, 1) if self.gpu_samples else None,
+            "gpu_temp_max": self._gpu_temp,
+            "cpu_temp_max": self._cpu_temp,
             "cpu_cores_avg": None,
             "cpu_cores_peak": None,
+            "disk_read_bytes": None,
+            "process_samples": self.process_samples,
+            "gpu_samples": self.gpu_samples,
         }
         if self.cgroup:
-            peak = _read_int(os.path.join(self.cgroup, "memory.peak"))
-            seen = max((s.get("cgroup") or 0 for s in self.samples), default=0)
-            result["cgroup_peak"] = peak or seen
-        timed = [s for s in process if s.get("cpu_seconds") is not None
+            result["cgroup_peak"] = (_read_int(os.path.join(self.cgroup, "memory.peak"))
+                                     or self._cgroup_seen)
+        timed = [s for s in self.samples if s.get("cpu_seconds") is not None
                  and (since is None or s["time"] >= since)]
         if len(timed) >= 2:
             span = timed[-1]["time"] - timed[0]["time"]
@@ -121,6 +168,8 @@ class Sampler(threading.Thread):
             ]
             if rates:
                 result["cpu_cores_peak"] = round(max(rates), 2)
+            if timed[0].get("disk_read") is not None and timed[-1].get("disk_read") is not None:
+                result["disk_read_bytes"] = timed[-1]["disk_read"] - timed[0]["disk_read"]
         return result
 
 
@@ -149,18 +198,36 @@ def settle_vram(seconds=20.0):
         time.sleep(1.5)
 
 
-def judge(measured, budget):
-    """Compare a measurement with the budget; return a list of (label, used, limit, ok)."""
-    ram = max(measured.get("cgroup_peak") or 0, measured["ram_peak"])
-    rows = [
-        ("RAM", ram, budget["ram"], ram <= budget["ram"]),
-        ("VRAM", measured["vram_peak"], budget["vram"], measured["vram_peak"] <= budget["vram"]),
-    ]
-    if measured.get("cpu_cores_avg") is not None:
-        limit = budget["cpu_quota"] / 100
-        rows.append(("CPU cores", measured["cpu_cores_avg"], limit,
-                     measured["cpu_cores_avg"] <= limit * 1.05))
-    if budget.get("max_temp") and measured.get("gpu_temp_max") is not None:
-        rows.append(("GPU temp", measured["gpu_temp_max"], budget["max_temp"],
-                     measured["gpu_temp_max"] <= budget["max_temp"]))
+def judge(measured, budget, gpu_expected=True):
+    """Compare a measurement with the budget.
+
+    Returns rows of (label, used, limit, ok). ``ok`` is None when the value could not be
+    measured: that is reported as unverified, never as a pass.
+    """
+    readings = [value for value in (measured.get("cgroup_peak"), measured.get("ram_peak"))
+                if value is not None]
+    ram = max(readings) if measured.get("ram_peak") is not None else None
+    # The kernel charges a cage in per-CPU batches, so its peak counter can read a few pages
+    # above the limit it enforces. That is accounting slack, not memory the engine obtained.
+    rows = [("RAM", ram, budget["ram"], None if ram is None else ram <= budget["ram"] + CHARGE_SLACK)]
+    if gpu_expected or budget["vram"]:
+        vram = measured.get("vram_peak")
+        rows.append(("VRAM", vram, budget["vram"], None if vram is None else vram <= budget["vram"]))
+    cores, limit = measured.get("cpu_cores_avg"), budget["cpu_quota"] / 100
+    rows.append(("CPU cores", cores, limit, None if cores is None else cores <= limit * 1.05))
+    if budget.get("max_temp"):
+        temps = [value for value in (measured.get("gpu_temp_max"), measured.get("cpu_temp_max"))
+                 if value is not None]
+        hottest = max(temps) if temps else None
+        rows.append(("Temperature", hottest, budget["max_temp"],
+                     None if hottest is None else hottest <= budget["max_temp"]))
     return rows
+
+
+def verdict(rows):
+    """0 when everything was measured inside the budget, 2 when something is over,
+    3 when nothing is over but something could not be measured."""
+    states = [row[3] for row in rows]
+    if any(state is False for state in states):
+        return 2
+    return 3 if any(state is None for state in states) else 0

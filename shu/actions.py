@@ -40,10 +40,42 @@ def _speed(count, nanoseconds):
     return round(count / (nanoseconds / 1e9), 2) if count and nanoseconds else None
 
 
-def bench_ollama(name, budget, tokens=64, prompt=DEFAULT_PROMPT, keep=False):
+def _tagged(name):
+    return name if ":" in name.split("/")[-1] else name + ":latest"
+
+
+def clear_ollama(target=None, unload_others=False):
+    """Unload the model about to be measured; other loaded models are the user's to keep.
+
+    Another loaded model shares the GPU, and Ollama may evict it mid-run, which would make
+    the measured VRAM too low. So their presence is an error unless unloading was authorized.
+    """
+    if not ollama.available():
+        return
+    loaded = [entry["name"] for entry in ollama.running()]
+    others = [name for name in loaded if target is None or _tagged(name) != _tagged(target)]
+    if others and not unload_others:
+        raise ActionError(
+            f"Ollama has other models loaded ({', '.join(others)}). They share the GPU and would "
+            "distort the measurement. Pass --unload-others to unload them, or wait until Ollama does."
+        )
+    for name in loaded:
+        ollama.unload(name)
+
+
+def _finish(result, measured, budget):
+    result["measured"] = measured
+    result["checks"] = monitor.judge(measured, budget, gpu_expected=bool(hardware.gpus()))
+    result["exit_code"] = monitor.verdict(result["checks"])
+    tokens, read = result.get("tokens"), measured.get("disk_read_bytes")
+    result["disk_read_per_token"] = int(read / tokens) if read is not None and tokens else None
+    return result
+
+
+def bench_ollama(name, budget, tokens=64, prompt=DEFAULT_PROMPT, keep=False, unload_others=False):
     """Load an Ollama model, generate, and measure what the run really used."""
     source = sources.resolve(name)
-    ollama.unload_all()
+    clear_ollama(name, unload_others)
     baseline = monitor.settle_vram()
     path = source.model.path
     sampler = monitor.Sampler(lambda: monitor.find_runner(path))
@@ -55,65 +87,59 @@ def bench_ollama(name, budget, tokens=64, prompt=DEFAULT_PROMPT, keep=False):
         sampler.stop()
     loaded = started + response.get("load_duration", 0) / 1e9
     measured = sampler.summary(baseline, since=loaded)
-    processor = None
-    for entry in ollama.running():
-        if entry.get("name") == name or entry.get("model") == name:
-            size, vram = entry.get("size", 0), entry.get("size_vram", 0)
-            processor = round(100 * vram / size) if size else None
     if not keep:
         ollama.unload(name)
-    return {
+    return _finish({
         "engine": "ollama",
         "model": name,
-        "measured": measured,
+        "limits": {"caged": False, "ram_hard": False, "cpu_hard": False},
         "load_seconds": round(response.get("load_duration", 0) / 1e9, 1),
         "tokens": response.get("eval_count", 0),
         "tokens_per_second": _speed(response.get("eval_count"), response.get("eval_duration")),
         "prompt_tokens_per_second": _speed(response.get("prompt_eval_count"),
                                            response.get("prompt_eval_duration")),
-        "gpu_share_percent": processor,
-        "checks": monitor.judge(measured, budget),
-    }
+    }, measured, budget)
 
 
 def bench_llama(source, plan, tokens=64, prompt=DEFAULT_PROMPT, with_projector=False,
-                log_path=None, report=None):
-    """Run the caged llama.cpp server once and measure it."""
+                log_path=None, report=None, unload_others=False):
+    """Run the caged llama.cpp server once and measure it, from launch to the last token."""
     budget = plan["budget"]
-    if ollama.available():
-        ollama.unload_all()
+    clear_ollama(None, unload_others)
     baseline = monitor.settle_vram()
     if plan["status"] == "paged":
         evict_from_page_cache(source.model.path)
     projector = source.projectors[0].path if with_projector and source.projectors else None
     server = engine.Server(source.model.path, plan["settings"], budget,
-                           projector=projector, log_path=log_path)
-    started = time.monotonic()
-    server.start()
-    load_seconds = time.monotonic() - started
-    sampler = monitor.Sampler(server.process.pid, cgroup=server.cgroup)
+                           projector=projector, log_path=log_path, report=report)
+    sampler = monitor.Sampler(lambda: server.process.pid if server.process else None)
     sampler.start()
-    if budget.get("max_temp"):
-        server.start_guard(budget["max_temp"], report=report)
-    generation = time.monotonic()
+    limits = {"caged": False, "ram_hard": False, "cpu_hard": False}
+    generation = None
     try:
+        started = time.monotonic()
+        server.start()
+        load_seconds = time.monotonic() - started
+        sampler.cgroup = server.cgroup
+        limits = server.enforcement()
+        generation = time.monotonic()
         response = server.complete(prompt, tokens)
     finally:
         sampler.stop()
         measured = sampler.summary(baseline, since=generation)
         server.stop()
     timings = response.get("timings", {})
-    return {
-        "engine": "llama.cpp (caged)" if server.caged else "llama.cpp (no cage available)",
+    return _finish({
+        "engine": "llama.cpp (caged)" if limits["caged"] else "llama.cpp (no cage)",
         "model": source.spec,
-        "measured": measured,
+        "limits": limits,
         "load_seconds": round(load_seconds, 1),
         "tokens": timings.get("predicted_n", 0),
         "tokens_per_second": round(timings.get("predicted_per_second", 0), 2) or None,
         "prompt_tokens_per_second": round(timings.get("prompt_per_second", 0), 2) or None,
         "thermal_pauses": server.pauses,
-        "checks": monitor.judge(measured, budget),
-    }
+        "sensor_failures": server.sensor_failures,
+    }, measured, budget)
 
 
 def launcher_script(source, plan, with_projector=False):
@@ -205,53 +231,95 @@ def layer_cost(source, settings):
     return max(1, high["vram"] - low["vram"])
 
 
+def next_settings(source, plan, bench, state):
+    """One corrective step from a measurement: (new settings, reason), or None when nothing to change.
+
+    Order: get back inside the budget first (VRAM, then RAM, then CPU); only then spend
+    spare VRAM on more GPU layers, which is what makes generation faster.
+    """
+    settings, budget, measured = plan["settings"], plan["budget"], bench["measured"]
+    vram, ram, cores = measured.get("vram_peak"), measured.get("ram_peak"), measured.get("cpu_cores_avg")
+    step = layer_cost(source, settings)
+    changed = dict(settings)
+    if vram is not None and vram > budget["vram"] and settings["num_gpu"] > 0:
+        changed["num_gpu"] = max(0, settings["num_gpu"] - max(1, math.ceil((vram - budget["vram"]) / step)))
+        return changed, f"VRAM {fmt_bytes(vram)} is over {fmt_bytes(budget['vram'])}"
+    # A model whose weights exceed the RAM budget cannot be fixed by tuning; only the cage holds it.
+    if ram is not None and ram > budget["ram"] and plan["status"] != "paged":
+        if settings["num_batch"] > 128:
+            changed["num_batch"] = 128
+            return changed, f"RAM {fmt_bytes(ram)} is over {fmt_bytes(budget['ram'])}: smaller batch"
+        if settings["num_ctx"] > planner.MIN_CONTEXT:
+            changed["num_ctx"] = max(planner.MIN_CONTEXT, settings["num_ctx"] // 2)
+            changed["num_batch"] = min(settings["num_batch"], changed["num_ctx"])
+            return changed, f"RAM {fmt_bytes(ram)} is over {fmt_bytes(budget['ram'])}: smaller context"
+    limit = budget["cpu_quota"] / 100
+    if cores is not None and cores > limit * 1.05 and settings["num_thread"] > 1:
+        changed["num_thread"] = settings["num_thread"] - 1
+        return changed, f"CPU {cores:.1f} cores is over {limit:.1f}: one thread fewer"
+    if not state["grew"] and vram is not None and settings["num_gpu"] < plan["layers"]["total"]:
+        state["grew"] = True
+        # Grow only into GROW_TARGET of the budget: idle VRAM use drifts between runs.
+        gain = int((budget["vram"] * GROW_TARGET - vram) // step)
+        if gain > 0:
+            changed["num_gpu"] = min(plan["layers"]["total"], settings["num_gpu"] + gain)
+            return changed, f"VRAM {fmt_bytes(vram)} leaves room under {fmt_bytes(budget['vram'])}"
+    return None
+
+
 def apply(source, plan, name, out_dir, text_only=False, create=True, verify=False,
-          tokens=64, report=print):
-    """Write the plan's files, create the Ollama model and optionally measure and tune it."""
+          tokens=64, report=print, unload_others=False):
+    """Write the plan's files, create the Ollama model and optionally measure and tune it.
+
+    With ``verify`` the settings that end up installed are always ones that were measured.
+    """
     settings = plan["settings"]
     with_projector = bool(source.projectors) and not text_only
+    projector_bytes = source.projector_bytes if with_projector else 0
     modelfile_path = os.path.join(out_dir, "Modelfile")
-    written = write_outputs(source, plan, out_dir, modelfile_for(source, settings, text_only),
-                            with_projector)
-    result = {"name": name, "out_dir": out_dir, "files": written, "created": False, "rounds": []}
-    if not create:
-        return result
-    ollama.create(name, modelfile_path)
-    result["created"] = True
-    if not verify:
+
+    def install():
+        planner.refresh(plan, source.model, projector_bytes)
+        written = write_outputs(source, plan, out_dir, modelfile_for(source, settings, text_only),
+                                with_projector)
+        if create:
+            ollama.create(name, modelfile_path)
+        return written
+
+    result = {"name": name, "out_dir": out_dir, "files": install(), "created": create,
+              "rounds": [], "verified": False}
+    if not (create and verify):
         return result
 
-    budget = plan["budget"]
-    total = plan["layers"]["total"]
-    step = layer_cost(source, settings)
-    grew = False
-    seen = {}
+    def measure():
+        report(f"measuring {name}: " + "  ".join(f"{key}={settings[key]}" for key in
+                                                 ("num_gpu", "num_thread", "num_ctx", "num_batch")))
+        bench = bench_ollama(name, plan["budget"], tokens=tokens, unload_others=unload_others)
+        record = {"num_gpu": settings["num_gpu"], "settings": dict(settings), **bench}
+        result["rounds"].append(record)
+        seen[tuple(sorted(settings.items()))] = record
+        return record
+
+    seen, state, final = {}, {"grew": False}, None
     for _ in range(MAX_TUNE_ROUNDS):
-        if settings["num_gpu"] in seen:
-            # Already measured inside the budget: growing further overshot, so this is the answer.
-            result["rounds"].append(seen[settings["num_gpu"]])
+        final = seen.get(tuple(sorted(settings.items())))
+        if final:
+            # Already measured: a later step overshot and came back, so this is the answer.
+            result["rounds"].append(final)
             break
-        report(f"measuring {name} with num_gpu={settings['num_gpu']} ...")
-        bench = bench_ollama(name, budget, tokens=tokens)
-        result["rounds"].append({"num_gpu": settings["num_gpu"], **bench})
-        seen[settings["num_gpu"]] = result["rounds"][-1]
-        used = bench["measured"]["vram_peak"]
-        change = 0
-        if used > budget["vram"] and settings["num_gpu"] > 0:
-            change = -max(1, math.ceil((used - budget["vram"]) / step))
-        elif not grew and settings["num_gpu"] < total and used:
-            # Grow only into GROW_TARGET of the budget: idle VRAM use drifts between runs.
-            change = max(0, int((budget["vram"] * GROW_TARGET - used) // step))
-            grew = True
-        if not change:
+        final = measure()
+        step = next_settings(source, plan, final, state)
+        if not step:
             break
-        settings["num_gpu"] = max(0, min(total, settings["num_gpu"] + change))
-        report(f"VRAM measured {fmt_bytes(used)} against {fmt_bytes(budget['vram'])}: "
-               f"retuning to num_gpu={settings['num_gpu']}")
-        plan["layers"]["on_gpu"] = settings["num_gpu"]
-        write_outputs(source, plan, out_dir, modelfile_for(source, settings, text_only),
-                      with_projector)
-        ollama.create(name, modelfile_path)
+        changed, reason = step
+        report(f"{reason}: retuning")
+        settings.update(changed)
+        install()
+        final = None
+    if final is None:
+        # The rounds ran out right after a change; what is installed must still be measured.
+        final = seen.get(tuple(sorted(settings.items()))) or measure()
+    result["verified"] = monitor.verdict(final.get("checks", [])) == 0
     return result
 
 
@@ -338,14 +406,15 @@ def convert(source, name=None, quant=None, out_path=None, threads=2, work_dir="s
 
 
 def describe_checks(checks):
+    """Rows of text for a results table; an unmeasured value is shown as such, never as a pass."""
     lines = []
     for label, used, limit, ok in checks:
-        if label in ("RAM", "VRAM"):
-            used_text, limit_text = fmt_bytes(used), fmt_bytes(limit)
-            share = f"{100 * used / limit:.0f}%" if limit else "n/a"
-        else:
-            used_text, limit_text = f"{used:.1f}", f"{limit:.1f}"
-            share = f"{100 * used / limit:.0f}%" if limit else "n/a"
+        as_bytes = label in ("RAM", "VRAM")
+        limit_text = fmt_bytes(limit) if as_bytes else f"{limit:.1f}"
+        if used is None:
+            lines.append((label, "no reading", limit_text, "n/a", "NOT MEASURED"))
+            continue
+        used_text = fmt_bytes(used) if as_bytes else f"{used:.1f}"
+        share = f"{100 * used / limit:.0f}%" if limit else "n/a"
         lines.append((label, used_text, limit_text, share, "PASS" if ok else "OVER"))
     return lines
-

@@ -104,13 +104,14 @@ def live(model, folder):
           validate=lambda d: d["layers"] > 0)
     check(f"shu bench {model} (caged llama.cpp, 30%)",
           shu("bench", model, "--percent", "30", "--text-only", "--tokens", "32", "--json"),
-          validate=lambda d: all(row[3] for row in d["checks"]) and d["tokens"] > 0)
+          validate=lambda d: d["exit_code"] == 0 and d["tokens"] > 0
+          and d["limits"]["ram_hard"] and d["limits"]["cpu_hard"])
     name = "shu-selftest"
     check(f"shu apply {model} --verify (Ollama, 30%)",
           shu("apply", model, "--percent", "30", "--verify", "--tokens", "32", "--name", name,
                "--out", os.path.join(folder, "live"), "--json"),
-          validate=lambda d: d["created"] and all(row[3] for row in d["rounds"][-1]["checks"]
-                                                  if row[0] == "VRAM"))
+          validate=lambda d: d["created"] and d["verified"]
+          and d["rounds"][-1]["settings"] == d["plan"]["settings"])
     check("shu bench --engine ollama on the created model",
           shu("bench", name, "--engine", "ollama", "--percent", "30", "--tokens", "32", "--json"),
           validate=lambda d: d["tokens"] > 0)
