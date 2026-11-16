@@ -164,8 +164,14 @@ class PiecesTest(unittest.TestCase):
         command = engine.server_command("/bin/llama-server", "/m.gguf", settings, 8080)
         joined = " ".join(command)
         for piece in ("--model /m.gguf", "-c 2048", "-b 128", "-ngl 9", "-t 3", "--load-mode mmap",
-                      "--cache-ram 0", "--no-mmproj", "--host 127.0.0.1"):
+                      "--cache-ram 0", "--no-mmproj", "--host 127.0.0.1", "--cors-origins localhost"):
             self.assertIn(piece, joined)
+        old_build = engine.server_command("/bin/llama-server", "/m.gguf", settings, 8080,
+                                          "/p.gguf", flags={"--cache-ram"})
+        self.assertIn("--cache-ram", old_build)
+        for unknown in ("--load-mode", "--fit", "--cors-origins", "--offline", "--no-mmproj-offload"):
+            self.assertNotIn(unknown, old_build)
+        self.assertIn("--mmproj", old_build)
         with_projector = engine.server_command("/bin/llama-server", "/m.gguf", settings, 8080, "/p.gguf")
         self.assertIn("--mmproj", with_projector)
         self.assertNotIn("--no-mmproj", with_projector)

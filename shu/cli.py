@@ -97,6 +97,8 @@ def print_hardware(hw):
                             f"{fmt_bytes(card['used'])} in use, {card['temperature']:.0f} C"))
     if not hw["gpus"]:
         rows.append(("GPU", "no NVIDIA GPU found: plans will be CPU-only"))
+    elif len(hw["gpus"]) > 1:
+        rows.append(("", f"{len(hw['gpus'])} GPUs found: Shu plans and measures the first one only"))
     rows.append(("CPU temperature", f"{hw['cpu_temperature']:.0f} C" if hw["cpu_temperature"]
                  else "no sensor (normal inside WSL)"))
     rows.append(("Cage", "available (systemd user scope: hard RAM and CPU limits)" if hw["can_cage"]

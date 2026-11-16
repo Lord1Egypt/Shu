@@ -50,18 +50,51 @@ def free_port():
         return handle.getsockname()[1]
 
 
-def server_command(binary, model_path, settings, port, projector=None, host="127.0.0.1"):
+# Options that only newer llama.cpp servers know: (flag as listed by --help, arguments to pass).
+OPTIONAL_FLAGS = (
+    ("--load-mode", ["--load-mode", "mmap"]),      # older builds memory-map by default
+    ("--fit", ["--fit", "off"]),                   # keep the planned layer count exactly
+    ("--cache-ram", ["--cache-ram", "0"]),         # no prompt cache growing in RAM
+    ("--cors-origins", ["--cors-origins", "localhost"]),   # web pages elsewhere may not call the API
+    ("--no-webui", ["--no-webui"]),
+    ("--offline", ["--offline"]),
+    ("--no-mmproj-offload", ["--no-mmproj-offload"]),
+)
+_flag_cache = {}
+
+
+def supported_flags(binary, environment=None):
+    """The optional flags this llama-server build accepts, read from its own --help."""
+    if binary not in _flag_cache:
+        try:
+            listing = subprocess.run([binary, "--help"], env=environment, capture_output=True,
+                                     text=True, timeout=60).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            listing = ""
+        # An unreadable --help means an unknown build: pass only what every version accepts.
+        _flag_cache[binary] = {flag for flag, _ in OPTIONAL_FLAGS if flag in listing}
+    return _flag_cache[binary]
+
+
+def server_command(binary, model_path, settings, port, projector=None, host="127.0.0.1", flags=None):
+    """Command line for the server; ``flags`` limits the optional ones to what the build supports."""
     command = [
         binary, "--model", model_path, "--host", host, "--port", str(port),
         "-c", str(settings["num_ctx"]),
         "-b", str(settings["num_batch"]), "-ub", str(settings["num_batch"]),
         "-ngl", str(settings["num_gpu"]),
         "-t", str(settings["num_thread"]), "-tb", str(settings["num_thread"]),
-        "--load-mode", "mmap", "--fit", "off", "--cache-ram", "0",
-        "-np", "1", "--no-webui", "--offline",
+        "-np", "1",
     ]
+    for flag, arguments in OPTIONAL_FLAGS:
+        if flag == "--no-mmproj-offload":
+            continue
+        if flags is None or flag in flags:
+            command += arguments
     if projector:
-        command += ["--mmproj", projector, "--no-mmproj-offload"]
+        command += ["--mmproj", projector]
+        if flags is None or "--no-mmproj-offload" in flags:
+            command += ["--no-mmproj-offload"]
     else:
         command += ["--no-mmproj"]
     return command
@@ -108,10 +141,11 @@ class Server:
         self.budget = budget
         self.caged = hardware.can_cage()
         self.unit = f"shu-{os.getpid()}-{self.port}"
-        self.command = server_command(binary, model_path, settings, self.port, projector)
+        self.environment = engine_environment(lib_dir)
+        self.command = server_command(binary, model_path, settings, self.port, projector,
+                                      flags=supported_flags(binary, self.environment))
         if self.caged:
             self.command = cage_prefix(budget, self.unit) + self.command
-        self.environment = engine_environment(lib_dir)
         self.log_path = log_path
         self.report = report or (lambda message: None)
         self.process = None

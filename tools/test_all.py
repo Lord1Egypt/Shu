@@ -97,6 +97,8 @@ def offline(folder):
     check("non-GGUF file is a clean error", shu("inspect", os.path.join(folder, "junk.gguf")),
           expect=1, contains="not a GGUF file")
     check("wizard stops cleanly when input ends", shu("wizard", stdin=""), expect=130)
+    for command in ("bench", "apply"):
+        check(f"shu {command} offers --unload-others", shu(command, "--help"), contains="--unload-others")
 
 
 def live(model, folder):
