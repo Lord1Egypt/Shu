@@ -65,11 +65,12 @@ the kernel and read back from the cage; RAM there is what the kernel charged to 
 Reading the table:
 
 - **RAM and CPU stayed inside the budget in every caged run**, including a 5.0 GiB model held to
-  2 GiB of RAM and 1 GiB of VRAM. VRAM is planned, not caged: the requantized Q3_K_M run came out
-  0.03 GiB over, and Shu flagged it. `shu apply --verify` is the step that corrects that from a measurement. That last row is the slow one: the model no longer fits, so it reads
-  2.26 GiB from disk for every token.
-- **The Ollama model of the 4B fits and was verified** after tuning its GPU layers
-  (16).
+  2 GiB of RAM and 1 GiB of VRAM. That row is the slow one: the model no longer fits, so it
+  reads 2.26 GiB from disk for every token.
+- **VRAM is planned, not caged.** The requantized Q3_K_M run came out 0.03 GiB over its VRAM
+  budget, and Shu flagged it. `shu apply --verify` is the step that corrects the layer count
+  from a measurement.
+- **The Ollama model of the 4B fits and was verified** by measurement with 16 layers on the GPU.
 - **The Ollama model of the 7.5B is over its RAM budget, and Shu says so** instead of
   reporting success. Ollama's server is not caged, so a model whose weights exceed the RAM
   budget cannot be held there. For that case use `shu serve`, as in the row above it.
