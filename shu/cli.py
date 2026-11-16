@@ -11,10 +11,10 @@ from . import __version__, actions, engine, hardware, hfconvert, monitor, ollama
 from .hardware import fmt_bytes
 
 BANNER = r"""
-   ___  _        _
-  | _ \| |_ __ _| |_     Ptah {version}
-  |  _/|  _/ _` | ' \    big models, small footprint
-  |_|   \__\__,_|_||_|
+   ___ _
+  / __| |_ _  _     Shu {version}
+  \__ \ ' \ || |    big models, small footprint
+  |___/_||_\_,_|
 """
 
 ERRORS = (sources.SourceError, ollama.OllamaError, engine.EngineError, actions.ActionError,
@@ -70,7 +70,7 @@ def planned(args):
     if source.kind == "safetensors":
         raise sources.SourceError(
             f"{args.model} is a safetensors folder. Convert it first: "
-            f"ptah convert {args.model} --quant Q4_K_M"
+            f"shu convert {args.model} --quant Q4_K_M"
         )
     projector = 0 if args.text_only else source.projector_bytes
     plan = planner.plan(source.model, budget_from(args, hw), projector)
@@ -164,7 +164,7 @@ def cmd_detect(args):
 def cmd_inspect(args):
     source = sources.resolve(args.model)
     if source.kind == "safetensors":
-        print(f"  {args.model}: safetensors folder. Convert it with `ptah convert`.")
+        print(f"  {args.model}: safetensors folder. Convert it with `shu convert`.")
         return 0
     data = dict(source.model.summary(), projectors=[p.summary() for p in source.projectors])
     _emit(args, data, lambda: print_model(source))
@@ -185,7 +185,7 @@ def cmd_plan(args):
 def cmd_apply(args):
     _, source, plan = planned(args)
     name = ollama.check_name(args.name or source.default_name())
-    out_dir = args.out or os.path.join("ptah-out", name.replace("/", "_").replace(":", "_"))
+    out_dir = args.out or os.path.join("shu-out", name.replace("/", "_").replace(":", "_"))
     quiet = args.json
     if not quiet:
         print_model(source)
@@ -206,7 +206,7 @@ def cmd_apply(args):
         print_bench(result["rounds"][-1])
     if plan["status"] == "paged":
         print(f"  This model is larger than the RAM budget. For a kernel-enforced limit run: "
-              f"ptah serve {args.model} --percent {args.percent:g}")
+              f"shu serve {args.model} --percent {args.percent:g}")
     return 0
 
 
@@ -292,7 +292,7 @@ def cmd_setup_converter(args):
         print(f"  The safetensors converter is already installed in {hfconvert.home()}")
         return 0
     root = hfconvert.install(report=lambda message: print("  " + message))
-    print(f"  Installed in {root}. You can now run: ptah convert <safetensors folder> --quant Q4_K_M")
+    print(f"  Installed in {root}. You can now run: shu convert <safetensors folder> --quant Q4_K_M")
     return 0
 
 
@@ -390,7 +390,7 @@ def wizard():
         answer = _ask(f"Requantize to {advice['quantization']} so it fits (lower quality, "
                       f"about {fmt_bytes(advice['estimated_size'])})? (y/n)", "n")
         if answer.lower().startswith("y"):
-            name = source.default_name()[: -len("-ptah")] + "-" + advice["quantization"].lower()
+            name = source.default_name()[: -len("-shu")] + "-" + advice["quantization"].lower()
             print("  Requantizing (this can take several minutes) ...")
             actions.convert(source, name=name if ollama.available() else None,
                             quant=advice["quantization"], threads=budget["threads"])
@@ -418,7 +418,7 @@ def wizard():
     name = source.default_name()
     if action in ("verify", "create"):
         name = ollama.check_name(_ask("Name of the new Ollama model", name))
-    out_dir = os.path.join("ptah-out", name.replace("/", "_").replace(":", "_"))
+    out_dir = os.path.join("shu-out", name.replace("/", "_").replace(":", "_"))
     print()
     if action in ("verify", "create", "files"):
         result = actions.apply(source, plan, name, out_dir, text_only=text_only,
@@ -448,11 +448,11 @@ def wizard():
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        prog="ptah",
+        prog="shu",
         description="Fit GGUF models inside a fixed share of this machine's RAM, CPU and GPU. "
                     "Run without arguments for the interactive wizard.",
     )
-    parser.add_argument("--version", action="version", version=f"ptah {__version__}")
+    parser.add_argument("--version", action="version", version=f"shu {__version__}")
     commands = parser.add_subparsers(dest="command", metavar="command")
 
     def command(name, handler, summary, model=True, budget=False):
@@ -471,7 +471,7 @@ def build_parser():
     command("plan", cmd_plan, "compute settings that keep a model inside the budget", budget=True)
 
     sub = command("apply", cmd_apply, "create an Ollama model limited to the budget", budget=True)
-    sub.add_argument("--name", help="name of the new Ollama model (default: <model>-ptah)")
+    sub.add_argument("--name", help="name of the new Ollama model (default: <model>-shu)")
     sub.add_argument("--out", metavar="DIR", help="folder for the generated files")
     sub.add_argument("--no-create", action="store_true", help="only write the files")
     sub.add_argument("--verify", action="store_true",
@@ -523,5 +523,5 @@ def main(argv=None):
         print("\n  Cancelled.", file=sys.stderr)
         return 130
     except ERRORS as error:
-        print(f"ptah: {error}", file=sys.stderr)
+        print(f"shu: {error}", file=sys.stderr)
         return 1

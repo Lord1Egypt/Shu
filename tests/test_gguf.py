@@ -3,7 +3,7 @@ import struct
 import tempfile
 import unittest
 
-from ptah import gguf
+from shu import gguf
 from tests import fakegguf
 
 

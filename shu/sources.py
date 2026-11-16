@@ -30,7 +30,7 @@ class Source:
         if self.kind == "ollama" and base.endswith(":latest"):
             base = base[: -len(":latest")]
         slug = re.sub(r"[^a-z0-9._-]+", "-", base.lower()).strip("-.") or "model"
-        return slug[:70] + "-ptah"
+        return slug[:70] + "-shu"
 
 
 def is_safetensors_dir(path):

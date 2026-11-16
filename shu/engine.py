@@ -85,12 +85,12 @@ class Server:
         if not binary:
             raise EngineError(
                 "llama-server was not found. Install Ollama (it bundles one) or llama.cpp, "
-                "or set PTAH_ENGINE_DIR to the folder that contains it."
+                "or set SHU_ENGINE_DIR to the folder that contains it."
             )
         self.port = port or free_port()
         self.budget = budget
         self.caged = hardware.can_cage()
-        self.unit = f"ptah-{os.getpid()}-{self.port}"
+        self.unit = f"shu-{os.getpid()}-{self.port}"
         self.command = server_command(binary, model_path, settings, self.port, projector)
         if self.caged:
             self.command = cage_prefix(budget, self.unit) + self.command

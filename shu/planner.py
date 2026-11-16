@@ -1,7 +1,7 @@
 """Turn a resource budget and a GGUF model into concrete runtime settings.
 
 The memory model follows llama.cpp. The constants below were calibrated against
-measurements of llama.cpp's server on an RTX 2060; ``ptah apply --verify``
+measurements of llama.cpp's server on an RTX 2060; ``shu apply --verify``
 corrects any remaining error by measuring the real load.
 """
 
@@ -219,7 +219,7 @@ def plan(model, budget, projector_bytes=0):
             "Only the embedding tables exceed the RAM budget. They are read a few rows at a "
             "time, so the slowdown is small."
         )
-        notes.append("Only a caged engine (`ptah serve`) can hold RAM to the budget in this mode.")
+        notes.append("Only a caged engine (`shu serve`) can hold RAM to the budget in this mode.")
     elif status == "paged":
         speed = ASSUMED_DISK_SPEED / paged
         result["estimate"]["paged_tokens_per_second"] = round(speed, 3)
@@ -230,7 +230,7 @@ def plan(model, budget, projector_bytes=0):
             f"{fmt_bytes(paged)} of weights do not fit in the RAM budget and are re-read from disk "
             f"for every token: roughly {speed:.1f} tokens/s on a 500 MB/s disk."
         )
-        notes.append("Only a caged engine (`ptah serve`) can hold RAM to the budget in this mode.")
+        notes.append("Only a caged engine (`shu serve`) can hold RAM to the budget in this mode.")
     if status in ("paged", "impossible"):
         advice = _recommend(model, budget, numbers["ram_working"], numbers["kv_total"])
         if advice:

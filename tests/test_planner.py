@@ -2,8 +2,8 @@ import os
 import tempfile
 import unittest
 
-from ptah import gguf, planner
-from ptah.hardware import GIB, MIB
+from shu import gguf, planner
+from shu.hardware import GIB, MIB
 from tests import fakegguf
 
 HW = {"logical_cpus": 12, "physical_cores": 6, "ram_total": 16 * GIB, "vram_total": 6 * GIB}
@@ -107,7 +107,7 @@ class PlanTest(unittest.TestCase):
         self.assertIn("recommendation", plan)
         self.assertNotIn("quantization", plan["recommendation"])
         self.assertTrue(any("s per token" in note for note in plan["notes"]))
-        self.assertTrue(any("ptah serve" in note for note in plan["notes"]))
+        self.assertTrue(any("shu serve" in note for note in plan["notes"]))
 
     def test_recommends_a_quantization_when_one_fits(self):
         model = Shape(layers=32, layer_bytes=200 * MIB, input_bytes=300 * MIB,

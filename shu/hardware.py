@@ -126,7 +126,7 @@ def can_cage():
 
 def find_engine(name):
     """Locate a llama.cpp binary on PATH or bundled with Ollama; return (path, lib_dir)."""
-    override = os.environ.get("PTAH_ENGINE_DIR")
+    override = os.environ.get("SHU_ENGINE_DIR")
     for directory in ([override] if override else []) + list(ENGINE_DIRS):
         candidate = os.path.join(directory, name)
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):

@@ -1,7 +1,7 @@
 """Convert Hugging Face safetensors models to GGUF with llama.cpp's official converter.
 
-The converter needs PyTorch and transformers. Ptah itself has no dependencies, so
-they are installed on request into a private virtual environment under the Ptah
+The converter needs PyTorch and transformers. Shu itself has no dependencies, so
+they are installed on request into a private virtual environment under the Shu
 cache, next to a pinned checkout of the converter script.
 """
 
@@ -22,8 +22,8 @@ class ConverterError(RuntimeError):
 
 
 def home():
-    base = os.environ.get("PTAH_HOME") or os.path.join(
-        os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "ptah")
+    base = os.environ.get("SHU_HOME") or os.path.join(
+        os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "shu")
     return os.path.join(base, "converter")
 
 
@@ -58,7 +58,7 @@ def install(report=print):
     if not shutil.which("git"):
         raise ConverterError("git is required to download the llama.cpp converter")
     paths = _paths()
-    tag = os.environ.get("PTAH_LLAMA_CPP_TAG", DEFAULT_TAG)
+    tag = os.environ.get("SHU_LLAMA_CPP_TAG", DEFAULT_TAG)
     if os.path.isdir(paths["root"]):
         shutil.rmtree(paths["root"])
     os.makedirs(paths["root"])
@@ -83,7 +83,7 @@ def convert(model_dir, out_path, output_type="f16"):
     """Write ``model_dir`` (config.json plus safetensors) as a GGUF file at ``out_path``."""
     if not ready():
         raise ConverterError(
-            "the safetensors converter is not installed. Run `ptah setup-converter` once "
+            "the safetensors converter is not installed. Run `shu setup-converter` once "
             "(downloads PyTorch and transformers, about 1 GB)."
         )
     if output_type not in OUTPUT_TYPES:

@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ptah-gguf"
+name = "shu-gguf"
 dynamic = ["version"]
 description = "Fit GGUF models inside a fixed share of a machine's RAM, CPU and GPU: for Ollama, llama.cpp and LM Studio"
 readme = "README.md"
@@ -19,13 +19,13 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Lord1Egypt/Ptah"
+Homepage = "https://github.com/Lord1Egypt/Shu"
 
 [project.scripts]
-ptah = "ptah.cli:main"
+shu = "shu.cli:main"
 
 [tool.setuptools]
-packages = ["ptah"]
+packages = ["shu"]
 
 [tool.setuptools.dynamic]
-version = { attr = "ptah.__version__" }
+version = { attr = "shu.__version__" }

@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from ptah import actions, cli, engine, monitor, ollama, planner, sources
-from ptah.hardware import GIB, MIB
+from shu import actions, cli, engine, monitor, ollama, planner, sources
+from shu.hardware import GIB, MIB
 from tests import fakegguf
 
 
@@ -27,7 +27,7 @@ class CommandTest(unittest.TestCase):
     def test_no_arguments_without_a_terminal_prints_help_and_returns(self):
         code, out, _ = run()
         self.assertEqual(code, 0)
-        self.assertIn("usage: ptah", out)
+        self.assertIn("usage: shu", out)
 
     def test_detect_json(self):
         code, out, _ = run("detect", "--json")
@@ -79,7 +79,7 @@ class CommandTest(unittest.TestCase):
                      ("apply", self.model, "--no-create", "--name=-rf")):
             code, _, err = run(*argv)
             self.assertEqual(code, 1, argv)
-            self.assertTrue(err.startswith("ptah: "), err)
+            self.assertTrue(err.startswith("shu: "), err)
 
     def test_safetensors_folder_is_recognised(self):
         folder = os.path.join(self.dir.name, "hf")
@@ -89,14 +89,14 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(sources.resolve(folder).kind, "safetensors")
         code, _, err = run("plan", folder)
         self.assertEqual(code, 1)
-        self.assertIn("ptah convert", err)
+        self.assertIn("shu convert", err)
 
     def test_convert_safetensors_needs_the_converter(self):
         folder = os.path.join(self.dir.name, "hf")
         os.mkdir(folder)
         for name in ("config.json", "model.safetensors"):
             open(os.path.join(folder, name), "w").close()
-        with mock.patch.dict(os.environ, {"PTAH_HOME": os.path.join(self.dir.name, "cache")}):
+        with mock.patch.dict(os.environ, {"SHU_HOME": os.path.join(self.dir.name, "cache")}):
             code, _, err = run("convert", folder, "--out", os.path.join(self.dir.name, "o.gguf"))
         self.assertEqual(code, 1)
         self.assertIn("setup-converter", err)
@@ -143,16 +143,16 @@ class PiecesTest(unittest.TestCase):
                 self.assertEqual(ollama.host(), expected)
 
     def test_default_names(self):
-        self.assertEqual(sources.Source("ollama", "qwen3.5:4b").default_name(), "qwen3.5-4b-ptah")
-        self.assertEqual(sources.Source("ollama", "Thoth:latest").default_name(), "thoth-ptah")
+        self.assertEqual(sources.Source("ollama", "qwen3.5:4b").default_name(), "qwen3.5-4b-shu")
+        self.assertEqual(sources.Source("ollama", "Thoth:latest").default_name(), "thoth-shu")
         self.assertEqual(sources.Source("gguf", "/m/My Model.Q4_K_M.gguf").default_name(),
-                         "my-model.q4_k_m-ptah")
+                         "my-model.q4_k_m-shu")
         long_name = sources.Source("gguf", "/m/" + "x" * 200 + ".gguf").default_name()
         self.assertLessEqual(len(long_name), 80)
 
     def test_cage_holds_ram_at_the_budget(self):
         budget = {"ram": 4 * GIB, "cpu_quota": 360}
-        prefix = engine.cage_prefix(budget, "ptah-test")
+        prefix = engine.cage_prefix(budget, "shu-test")
         self.assertIn(f"MemoryMax={4 * GIB}", prefix)
         self.assertFalse(any(part.startswith("MemoryHigh") for part in prefix))
         self.assertIn("MemorySwapMax=0", prefix)
@@ -242,7 +242,7 @@ class PiecesTest(unittest.TestCase):
 
             with mock.patch.object(actions, "bench_ollama", fake_bench), \
                     mock.patch.object(ollama, "create", lambda *a, **k: None):
-                result = actions.apply(source, plan, "tiny-ptah", os.path.join(folder, "out"),
+                result = actions.apply(source, plan, "tiny-shu", os.path.join(folder, "out"),
                                        verify=True, report=lambda message: None)
             self.assertEqual(calls, [4, 6, 5])
             self.assertEqual(plan["settings"]["num_gpu"], 5)
@@ -266,7 +266,7 @@ class PiecesTest(unittest.TestCase):
 
             with mock.patch.object(actions, "bench_ollama", fake_bench), \
                     mock.patch.object(ollama, "create", lambda *a, **k: None):
-                actions.apply(source, plan, "tiny-ptah", os.path.join(folder, "out"),
+                actions.apply(source, plan, "tiny-shu", os.path.join(folder, "out"),
                               verify=True, report=lambda message: None)
             self.assertEqual(calls, [4])
             self.assertEqual(plan["settings"]["num_gpu"], 4)

@@ -3,6 +3,6 @@ __pycache__/
 *.egg-info/
 build/
 dist/
-ptah-out/
+shu-out/
 *.gguf
 .venv/

@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest import mock
 
-from ptah import engine, hardware, hfconvert
+from shu import engine, hardware, hfconvert
 
 
 def state(pid):
@@ -74,14 +74,14 @@ class EnvironmentTest(unittest.TestCase):
             with open(binary, "w") as handle:
                 handle.write("#!/bin/sh\n")
             os.chmod(binary, 0o755)
-            with mock.patch.dict(os.environ, {"PTAH_ENGINE_DIR": folder}):
+            with mock.patch.dict(os.environ, {"SHU_ENGINE_DIR": folder}):
                 self.assertEqual(hardware.find_engine("llama-server"), (binary, folder))
 
 
 class ConverterTest(unittest.TestCase):
     def test_not_ready_in_an_empty_cache(self):
         with tempfile.TemporaryDirectory() as folder:
-            with mock.patch.dict(os.environ, {"PTAH_HOME": folder}):
+            with mock.patch.dict(os.environ, {"SHU_HOME": folder}):
                 self.assertFalse(hfconvert.ready())
                 with self.assertRaises(hfconvert.ConverterError):
                     hfconvert.convert(folder, os.path.join(folder, "o.gguf"))

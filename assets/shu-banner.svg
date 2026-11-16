@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-label="Ptah: big models, small footprint">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-label="Shu: big models, small footprint">
   <defs>
     <linearGradient id="night" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0c2240"/>
@@ -26,7 +26,7 @@
     <circle cx="70" cy="-22" r="9" fill="url(#gold)"/>
   </g>
 
-  <text x="290" y="172" font-family="Georgia, 'Times New Roman', serif" font-size="112" font-weight="700" letter-spacing="18" fill="url(#gold)">PTAH</text>
+  <text x="290" y="172" font-family="Georgia, 'Times New Roman', serif" font-size="112" font-weight="700" letter-spacing="18" fill="url(#gold)">SHU</text>
   <text x="294" y="222" font-family="Georgia, 'Times New Roman', serif" font-size="30" fill="#e9edf5">Big models. Small footprint.</text>
   <text x="294" y="266" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" letter-spacing="2" fill="#8fa3c2">GGUF  ·  OLLAMA  ·  LLAMA.CPP  ·  LM STUDIO</text>
 

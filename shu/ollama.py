@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:-]{0,199}$")
-PTAH_PARAMETERS = ("num_gpu", "num_thread", "num_ctx", "num_batch", "use_mmap")
+SHU_PARAMETERS = ("num_gpu", "num_thread", "num_ctx", "num_batch", "use_mmap")
 
 
 class OllamaError(RuntimeError):
@@ -126,7 +126,7 @@ def rewritten_modelfile(modelfile, settings, keep_paths, replace=None):
             if path not in keep_paths:
                 continue
             line = f"FROM {replace.get(path, path)}"
-        elif keyword == "PARAMETER" and len(parts) >= 2 and parts[1] in PTAH_PARAMETERS:
+        elif keyword == "PARAMETER" and len(parts) >= 2 and parts[1] in SHU_PARAMETERS:
             continue
         lines.append(line)
     lines += parameter_lines(settings)
@@ -135,7 +135,7 @@ def rewritten_modelfile(modelfile, settings, keep_paths, replace=None):
 
 def parameter_lines(settings):
     lines = []
-    for key in PTAH_PARAMETERS:
+    for key in SHU_PARAMETERS:
         if key in settings:
             value = settings[key]
             if isinstance(value, bool):
