@@ -162,8 +162,9 @@ def print_bench(bench):
     if measured.get("ram_peak") is not None:
         detail.append(f"process memory at its peak: {fmt_bytes(measured['ram_private'])} private + "
                       f"{fmt_bytes(measured['ram_model_pages'])} model pages (reclaimable page cache)")
-    if measured.get("cgroup_peak"):
-        detail.append(f"the cage was charged {fmt_bytes(measured['cgroup_peak'])} at its peak")
+    if measured.get("cgroup_peak") and limits.get("ram_hard"):
+        detail.append("RAM above is what the kernel charged to the cage; the process's own resident "
+                      f"size peaked at {fmt_bytes(measured['ram_peak'])} (includes shared libraries)")
     if bench.get("disk_read_per_token"):
         detail.append(f"read {fmt_bytes(bench['disk_read_per_token'])} from disk per generated token")
     if measured.get("gpu_temp_max") is not None:
@@ -222,7 +223,7 @@ def cmd_apply(args):
                            report=(lambda message: None) if quiet else (lambda m: print("  " + m)))
     if quiet:
         print(json.dumps({"plan": plan, **result}, indent=2, default=str))
-        return 0
+        return result["exit_code"]
     print(f"  Wrote {', '.join(result['files'])} to {out_dir}")
     if result["created"]:
         print(f"  Created Ollama model {_color(name, '36')}. Run it with: ollama run {name}")
@@ -235,7 +236,7 @@ def cmd_apply(args):
     if plan["status"] == "paged":
         print(f"  This model is larger than the RAM budget. For a kernel-enforced limit run: "
               f"shu serve {args.model} --percent {args.percent:g}")
-    return 0
+    return result["exit_code"]
 
 
 def cmd_bench(args):
@@ -267,9 +268,9 @@ def cmd_serve(args):
     if plan["status"] == "impossible":
         print("  Not starting: the working memory does not fit this budget.")
         return 2
-    if plan["status"] == "paged":
-        actions.evict_from_page_cache(source.model.path)
     projector = source.projectors[0].path if source.projectors and not args.text_only else None
+    if hardware.can_cage():
+        actions.prepare_cage(source, projector)
     server = engine.Server(source.model.path, plan["settings"], budget, projector=projector,
                            port=args.port, log_path=args.log,
                            report=lambda message: print("  thermal guard: " + message))

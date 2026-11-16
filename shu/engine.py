@@ -113,9 +113,12 @@ def cage_prefix(budget, unit):
     ]
 
 
+_LIBC = ctypes.CDLL(None)     # resolved once here, so nothing is loaded between fork and exec
+
+
 def _die_with_parent():
     """Runs in the child before exec: the engine is terminated if Shu itself dies."""
-    ctypes.CDLL(None).prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    _LIBC.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
 
 
 def _read(path):
@@ -207,7 +210,15 @@ class Server:
                                    else "; rerun with --log FILE for details"))
 
     def start(self, ready_timeout=1800):
-        """Launch the engine and wait until it can serve; the thermal guard runs from the first second."""
+        """Launch the engine and wait until it can serve."""
+        self.launch()
+        self.wait_ready(ready_timeout)
+
+    def launch(self):
+        """Start the engine process; the thermal guard runs from this moment, through loading.
+
+        Call this before starting other threads: the child is prepared between fork and exec.
+        """
         max_temp = self.budget.get("max_temp")
         if max_temp and not any(value is not None for value in hardware.temperatures().values()):
             raise EngineError(
@@ -221,9 +232,12 @@ class Server:
         finally:
             if self.log_path:
                 log.close()
+        if max_temp:
+            self._start_guard(max_temp)
+
+    def wait_ready(self, ready_timeout=1800):
+        """Block until the engine answers; stop it if it dies, times out or we are interrupted."""
         try:
-            if max_temp:
-                self._start_guard(max_temp)
             deadline = time.monotonic() + ready_timeout
             while time.monotonic() < deadline:
                 if self.process.poll() is not None:

@@ -198,15 +198,20 @@ def settle_vram(seconds=20.0):
         time.sleep(1.5)
 
 
-def judge(measured, budget, gpu_expected=True):
+def judge(measured, budget, gpu_expected=True, caged=False):
     """Compare a measurement with the budget.
 
     Returns rows of (label, used, limit, ok). ``ok`` is None when the value could not be
     measured: that is reported as unverified, never as a pass.
+
+    RAM is what the kernel charged to the cage when there is one: that is the number the
+    limit applies to, and the model file is dropped from the page cache before a caged run
+    so all of its pages are charged there. The process's own resident size also counts
+    shared system libraries that sit in memory regardless. Without a cage it is all we have.
     """
-    readings = [value for value in (measured.get("cgroup_peak"), measured.get("ram_peak"))
-                if value is not None]
-    ram = max(readings) if measured.get("ram_peak") is not None else None
+    ram = measured.get("ram_peak")
+    if caged and ram is not None and measured.get("cgroup_peak") is not None:
+        ram = measured["cgroup_peak"]
     # The kernel charges a cage in per-CPU batches, so its peak counter can read a few pages
     # above the limit it enforces. That is accounting slack, not memory the engine obtained.
     rows = [("RAM", ram, budget["ram"], None if ram is None else ram <= budget["ram"] + CHARGE_SLACK)]

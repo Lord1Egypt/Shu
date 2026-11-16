@@ -37,9 +37,9 @@ how much of the machine the model may use, and Shu:
 - **reads the model** (pure-Python GGUF parser) to learn the exact size of every layer;
 - **plans the load**: how many layers fit in the VRAM budget, how many threads, how much context;
 - **loads it partially**: only the planned layers go to the GPU, the rest is memory-mapped, so a model larger than the RAM budget still runs by paging from disk;
-- **enforces the budget** with a kernel cage (cgroup v2) that the model cannot exceed, with no root needed;
-- **guards the temperature**: pauses the engine when the GPU or CPU gets too hot and resumes when it cools;
-- **measures the real run** and retunes itself until the numbers are inside the budget.
+- **enforces the budget** with a kernel cage (cgroup v2) that the model cannot exceed, with no root needed, and reads the limits back to confirm they are in force;
+- **guards the temperature** from the moment the engine starts: it freezes the engine when the GPU or CPU gets too hot and thaws it when it cools;
+- **measures the real run** and retunes itself until the numbers are inside the budget. A value it could not measure is reported as not measured, never as a pass.
 
 No Python packages to install. The core is the standard library only.
 
@@ -161,10 +161,19 @@ Budget options, shared by `plan`, `apply`, `bench` and `serve`:
 | `--batch TOKENS` | Batch size (default 512) |
 | `--max-temp C` | Pause the caged engine at this temperature, resume 5 degrees below |
 | `--text-only` | Leave out a vision/audio projector to save memory |
+| `--unload-others` | (`bench`, `apply --verify`) allow unloading other models Ollama has loaded |
 | `--json` | Machine-readable output |
 
-`shu bench` exits with 0 when every measured value is inside the budget and 2 when
-one is over, so it can gate a script.
+`shu bench` and `shu apply --verify` can gate a script through their exit code:
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Every value was measured and is inside the budget |
+| 2 | At least one value is over the budget |
+| 3 | Nothing is over, but something could not be measured, so the budget is not confirmed |
+
+Shu never unloads a model you did not ask it to. If Ollama has other models loaded,
+a measurement stops and says so; pass `--unload-others` to allow it.
 
 ## Model types
 
@@ -202,9 +211,13 @@ flowchart LR
 | Resource | How the limit is applied | Enforced by |
 |---|---|---|
 | **VRAM** | Only as many layers as fit are sent to the GPU (`num_gpu`); `--verify` corrects the count from a real measurement | llama.cpp, verified by measurement |
-| **RAM** | Weights are memory-mapped; in `shu serve` a cgroup caps the process at the budget, and the kernel evicts and re-reads model pages instead of growing | Linux kernel (cgroup v2 `memory.max`) |
-| **CPU** | Thread count (`num_thread`) and, in `shu serve`, a CPU quota | Linux kernel (cgroup v2 `cpu.max`) |
-| **Heat** | The thermal guard pauses the engine at `--max-temp` and resumes 5 degrees cooler | Shu supervisor |
+| **RAM** | Weights are memory-mapped; in `shu serve` a cgroup caps the process at the budget, and the kernel evicts and re-reads model pages instead of growing. The model is dropped from the page cache first, so every page it uses is charged to the cage | Linux kernel (cgroup v2 `memory.max`), read back after launch |
+| **CPU** | Thread count (`num_thread`) and, in `shu serve`, a CPU quota | Linux kernel (cgroup v2 `cpu.max`), read back after launch |
+| **Heat** | The thermal guard runs from launch, through loading. At `--max-temp` it freezes the whole cage and thaws it 5 degrees cooler. With no sensor it refuses to start; if sensors stop answering it freezes until they return | Shu supervisor |
+
+Every measurement says which limits were enforced by the kernel and which were only
+bounded by settings. If Shu itself is killed, the kernel terminates the engine with it,
+so nothing is left running.
 
 Two ways to run, same plan:
 
@@ -252,6 +265,7 @@ The offline suite needs no GPU, no Ollama and no network; it runs in CI on every
   on WSL2 set `systemd=true` in `/etc/wsl.conf`). Without it Shu still plans and limits VRAM and
   threads, and tells you that RAM and CPU are not hard-limited.
 - GPU planning supports NVIDIA cards through `nvidia-smi`. Other machines are planned CPU-only.
+  With several GPUs Shu plans and measures the first one only, and says so.
 - WSL2 exposes no CPU temperature sensor, so there the thermal guard watches the GPU only.
 - VRAM is measured as the change in the card's used memory, so close other GPU-heavy programs
   while measuring.
@@ -259,6 +273,12 @@ The offline suite needs no GPU, no Ollama and no network; it runs in CI on every
   guard for heat.
 - The LM Studio settings are computed, not measured inside LM Studio.
 - Split GGUF models are planned and served by llama.cpp directly; Ollama cannot import them.
+- The served API accepts browser requests from localhost pages only, and listens on 127.0.0.1.
+- Shu passes newer llama.cpp options only when the installed server lists them in its `--help`.
+  It is measured with the llama.cpp bundled in Ollama 0.40; other versions are untested.
+
+The status of every finding from the project's engineering audit, with the measurements
+behind each fix, is in [docs/AUDIT.md](docs/AUDIT.md).
 
 ## The name
 

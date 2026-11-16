@@ -183,13 +183,24 @@ class PiecesTest(unittest.TestCase):
         self.assertEqual([row[0] for row in rows], ["RAM", "VRAM", "CPU cores", "Temperature"])
         self.assertTrue(all(row[3] is True for row in rows))
         self.assertEqual(monitor.verdict(rows), 0)
-        bad = {"ram_peak": 3 * GIB, "cgroup_peak": 5 * GIB, "vram_peak": 3 * GIB,
-               "cpu_cores_avg": 5.0, "gpu_temp_max": 91}
+        bad = {"ram_peak": 5 * GIB, "vram_peak": 3 * GIB, "cpu_cores_avg": 5.0, "gpu_temp_max": 91}
         self.assertTrue(all(row[3] is False for row in monitor.judge(bad, budget)))
         self.assertEqual(monitor.verdict(monitor.judge(bad, budget)), 2)
         rows = actions.describe_checks(monitor.judge(bad, budget))
         self.assertEqual(rows[0][:2], ("RAM", "5.00 GiB"))
         self.assertEqual(rows[0][4], "OVER")
+
+    def test_in_a_cage_ram_is_what_the_kernel_charged(self):
+        budget = {"ram": 4 * GIB, "vram": 2 * GIB, "cpu_quota": 360}
+        # Resident size a little over (shared libraries), cage exactly at its limit plus slack.
+        run = {"ram_peak": 4 * GIB + 40 * MIB, "cgroup_peak": 4 * GIB + 4096, "vram_peak": GIB,
+               "cpu_cores_avg": 1.0}
+        caged = monitor.judge(run, budget, caged=True)[0]
+        self.assertEqual((caged[1], caged[3]), (4 * GIB + 4096, True))
+        loose = monitor.judge(run, budget, caged=False)[0]
+        self.assertEqual((loose[1], loose[3]), (4 * GIB + 40 * MIB, False))
+        beyond = dict(run, cgroup_peak=4 * GIB + 64 * MIB)
+        self.assertFalse(monitor.judge(beyond, budget, caged=True)[0][3])
 
     def test_missing_readings_are_never_a_pass(self):
         """A run where the process or the GPU could not be read must not look like success."""
@@ -206,7 +217,7 @@ class PiecesTest(unittest.TestCase):
         over_and_blind = {"ram_peak": 9 * GIB, "vram_peak": None, "cpu_cores_avg": None}
         self.assertEqual(monitor.verdict(monitor.judge(over_and_blind, budget)), 2)
         # A cage reading alone does not stand in for the process reading.
-        self.assertIsNone(monitor.judge({"cgroup_peak": GIB}, budget)[0][3])
+        self.assertIsNone(monitor.judge({"cgroup_peak": GIB}, budget, caged=True)[0][3])
 
     def test_no_vram_row_on_a_machine_without_a_gpu(self):
         budget = {"ram": 4 * GIB, "vram": 0, "cpu_quota": 360}

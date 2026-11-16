@@ -14,6 +14,7 @@ DEFAULT_PROMPT = "Explain in a few sentences why the Nile was important to ancie
 SPLIT_ADVICE = ("Ollama cannot import a split GGUF. Run it with `shu serve`, or merge the shards "
                 "first with llama.cpp's `llama-gguf-split --merge`.")
 UNQUANTIZED = ("F32", "F16", "BF16")
+WARMUP_TOKENS = 8            # generated before timing, so first-touch disk reads are not counted as speed
 MAX_TUNE_ROUNDS = 4
 GROW_TARGET = 0.95
 
@@ -34,6 +35,16 @@ def evict_from_page_cache(path):
         pass
     finally:
         os.close(descriptor)
+
+
+def prepare_cage(source, projector=None):
+    """Drop the model's files from the page cache so the cage is charged for all of them.
+
+    Pages another cgroup already cached would otherwise ride along uncounted and uncapped.
+    The price is a cold load.
+    """
+    for path in list(source.model.shards) + ([projector] if projector else []):
+        evict_from_page_cache(path)
 
 
 def _speed(count, nanoseconds):
@@ -65,7 +76,8 @@ def clear_ollama(target=None, unload_others=False):
 
 def _finish(result, measured, budget):
     result["measured"] = measured
-    result["checks"] = monitor.judge(measured, budget, gpu_expected=bool(hardware.gpus()))
+    result["checks"] = monitor.judge(measured, budget, gpu_expected=bool(hardware.gpus()),
+                                     caged=result["limits"]["ram_hard"])
     result["exit_code"] = monitor.verdict(result["checks"])
     tokens, read = result.get("tokens"), measured.get("disk_read_bytes")
     result["disk_read_per_token"] = int(read / tokens) if read is not None and tokens else None
@@ -80,20 +92,21 @@ def bench_ollama(name, budget, tokens=64, prompt=DEFAULT_PROMPT, keep=False, unl
     path = source.model.path
     sampler = monitor.Sampler(lambda: monitor.find_runner(path))
     sampler.start()
-    started = time.monotonic()
+    generation = None
     try:
+        warmup = ollama.generate(name, prompt, WARMUP_TOKENS)
+        generation = time.monotonic()
         response = ollama.generate(name, prompt, tokens)
     finally:
         sampler.stop()
-    loaded = started + response.get("load_duration", 0) / 1e9
-    measured = sampler.summary(baseline, since=loaded)
+    measured = sampler.summary(baseline, since=generation)
     if not keep:
         ollama.unload(name)
     return _finish({
         "engine": "ollama",
         "model": name,
         "limits": {"caged": False, "ram_hard": False, "cpu_hard": False},
-        "load_seconds": round(response.get("load_duration", 0) / 1e9, 1),
+        "load_seconds": round(warmup.get("load_duration", 0) / 1e9, 1),
         "tokens": response.get("eval_count", 0),
         "tokens_per_second": _speed(response.get("eval_count"), response.get("eval_duration")),
         "prompt_tokens_per_second": _speed(response.get("prompt_eval_count"),
@@ -107,21 +120,23 @@ def bench_llama(source, plan, tokens=64, prompt=DEFAULT_PROMPT, with_projector=F
     budget = plan["budget"]
     clear_ollama(None, unload_others)
     baseline = monitor.settle_vram()
-    if plan["status"] == "paged":
-        evict_from_page_cache(source.model.path)
     projector = source.projectors[0].path if with_projector and source.projectors else None
     server = engine.Server(source.model.path, plan["settings"], budget,
                            projector=projector, log_path=log_path, report=report)
-    sampler = monitor.Sampler(lambda: server.process.pid if server.process else None)
-    sampler.start()
+    if server.caged:
+        prepare_cage(source, projector)
     limits = {"caged": False, "ram_hard": False, "cpu_hard": False}
     generation = None
+    started = time.monotonic()
+    server.launch()
+    sampler = monitor.Sampler(server.process.pid)
+    sampler.start()
     try:
-        started = time.monotonic()
-        server.start()
+        server.wait_ready()
         load_seconds = time.monotonic() - started
         sampler.cgroup = server.cgroup
         limits = server.enforcement()
+        server.complete(prompt, WARMUP_TOKENS)
         generation = time.monotonic()
         response = server.complete(prompt, tokens)
     finally:
@@ -289,7 +304,7 @@ def apply(source, plan, name, out_dir, text_only=False, create=True, verify=Fals
         return written
 
     result = {"name": name, "out_dir": out_dir, "files": install(), "created": create,
-              "rounds": [], "verified": False}
+              "rounds": [], "verified": False, "exit_code": 0}
     if not (create and verify):
         return result
 
@@ -321,7 +336,8 @@ def apply(source, plan, name, out_dir, text_only=False, create=True, verify=Fals
     if final is None:
         # The rounds ran out right after a change; what is installed must still be measured.
         final = seen.get(tuple(sorted(settings.items()))) or measure()
-    result["verified"] = monitor.verdict(final.get("checks", [])) == 0
+    result["exit_code"] = monitor.verdict(final.get("checks", []))
+    result["verified"] = result["exit_code"] == 0
     return result
 
 
