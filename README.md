@@ -46,33 +46,69 @@ No Python packages to install. The core is the standard library only.
 ## Measured results
 
 Real runs on a laptop: **Intel i7-9750H (6 cores), 12.7 GiB RAM (WSL2), NVIDIA RTX 2060 6 GiB**,
-Ollama 0.40 with its bundled llama.cpp. Every number below was measured by `shu bench` /
-`shu apply --verify`, not estimated.
+Ollama 0.40 with its bundled llama.cpp. Every number below was measured by `shu bench` or
+`shu apply --verify`, not estimated. In the caged rows the RAM and CPU limits were enforced by
+the kernel and read back from the cage; RAM there is what the kernel charged to the cage.
 
-| Model | Size | Budget | Engine | RAM used / limit | VRAM used / limit | CPU cores used / limit | GPU peak | Speed |
+| Model | File size | Budget | Engine | RAM used / limit | VRAM used / limit | CPU cores used / limit | GPU peak | Speed |
 |---|---|---|---|---|---|---|---|---|
-| Qwen3.5 4B Q4_K_M + vision | 3.1 GiB | 30% | Ollama model | 2.83 / 3.80 GiB | 1.75 / 1.80 GiB | 2.7 / 3.6 | 60 °C | 6.59 tok/s |
-| Qwen3.5 4B Q4_K_M | 2.5 GiB | 25% | caged llama.cpp | 2.66 / 3.17 GiB | 1.36 / 1.50 GiB | 2.0 / 3.0 | 60 °C | 5.68 tok/s |
-| Qwen3.5 4B Q4_K_M | 2.5 GiB | 30% | caged llama.cpp | 2.18 / 3.80 GiB | 1.69 / 1.80 GiB | 3.0 / 3.6 | 61 °C | 6.16 tok/s |
-| Qwen3.5 4B Q4_K_M | 2.5 GiB | 35% | caged llama.cpp | 1.85 / 4.43 GiB | 2.02 / 2.10 GiB | 3.6 / 4.2 | 62 °C | 7.07 tok/s |
-| Qwen3.5 4B requantized to Q3_K_M | 2.1 GiB | 30% | caged llama.cpp | 2.66 / 3.80 GiB | 1.73 / 1.80 GiB | 1.4 / 3.6 | 62 °C | 3.06 tok/s |
-| Gemma 4 E4B 7.5B Q4_K_M | 5.0 GiB | 30% | caged llama.cpp | 3.50 / 3.80 GiB | 1.55 / 1.80 GiB | 2.8 / 3.6 | 61 °C | 4.41 tok/s |
-| SmolLM2 135M Q4_K_M (from safetensors) | 0.1 GiB | 30% | caged llama.cpp | 0.60 / 3.80 GiB | 0.30 / 1.80 GiB | 1.0 / 3.6 | 60 °C | 76.94 tok/s |
+| Qwen3.5 4B Q4_K_M + vision | 3.1 GiB | 30% | Ollama model | 2.83 / 3.80 GiB | 1.72 / 1.80 GiB | 3.0 / 3.6 | 64 °C | 6.14 tok/s |
+| Qwen3.5 4B Q4_K_M | 2.5 GiB | 25% | caged llama.cpp | 2.90 / 3.17 GiB | 1.37 / 1.50 GiB | 3.0 / 3.0 | 61 °C | 4.99 tok/s |
+| Qwen3.5 4B Q4_K_M | 2.5 GiB | 30% | caged llama.cpp | 3.07 / 3.80 GiB | 1.69 / 1.80 GiB | 2.9 / 3.6 | 63 °C | 5.05 tok/s |
+| Qwen3.5 4B Q4_K_M | 2.5 GiB | 35% | caged llama.cpp | 3.07 / 4.43 GiB | 2.01 / 2.10 GiB | 3.7 / 4.2 | 64 °C | 6.29 tok/s |
+| Qwen3.5 4B requantized to Q3_K_M | 2.1 GiB | 30% | caged llama.cpp | 2.57 / 3.80 GiB | 1.83 / 1.80 GiB **over** | 2.8 / 3.6 | 64 °C | 5.42 tok/s |
+| Gemma 4 E4B 7.5B Q4_K_M | 5.0 GiB | 30% | caged llama.cpp | 3.80 / 3.80 GiB | 1.58 / 1.80 GiB | 2.9 / 3.6 | 61 °C | 4.63 tok/s |
+| Gemma 4 E4B 7.5B Q4_K_M | 5.0 GiB | 2 GiB RAM, 1 GiB VRAM, 3 threads | caged llama.cpp | 2.00 / 2.00 GiB | 0.94 / 1.00 GiB | 2.7 / 4.0 | 61 °C | 0.34 tok/s |
+| Gemma 4 E4B 7.5B Q4_K_M + vision/audio | 5.9 GiB | 30% | Ollama model | 5.05 / 3.80 GiB **over** | 1.75 / 1.80 GiB | 2.6 / 3.6 | 62 °C | 1.24 tok/s |
+| SmolLM2 135M Q4_K_M (converted from safetensors) | 0.1 GiB | 30% | caged llama.cpp | 0.56 / 3.80 GiB | 0.30 / 1.80 GiB | 1.7 / 3.6 | 60 °C | 102.33 tok/s |
 
-The requantized Q3_K_M model fit the budget but ran slower than Q4_K_M on this machine (3.1 vs 6.2 tokens/s); the cause is not yet diagnosed.
+Reading the table:
+
+- **RAM and CPU stayed inside the budget in every caged run**, including a 5.0 GiB model held to
+  2 GiB of RAM and 1 GiB of VRAM. VRAM is planned, not caged: the requantized Q3_K_M run came out
+  0.03 GiB over, and Shu flagged it. `shu apply --verify` is the step that corrects that from a measurement. That last row is the slow one: the model no longer fits, so it reads
+  2.26 GiB from disk for every token.
+- **The Ollama model of the 4B fits and was verified** after tuning its GPU layers
+  (16).
+- **The Ollama model of the 7.5B is over its RAM budget, and Shu says so** instead of
+  reporting success. Ollama's server is not caged, so a model whose weights exceed the RAM
+  budget cannot be held there. For that case use `shu serve`, as in the row above it.
+- Requantizing to Q3_K_M made the 4B model smaller without making it slower here
+  (5.42 against 5.05 tokens/s at the same budget).
 
 ## Honest expectations for very large models
 
-Shu makes a model **fit**. It cannot make a model that is ten times larger than
-your memory **fast**: every weight that does not fit in RAM is read from disk
-again for each token. Shu tells you this before you wait for it.
+Shu makes a model **fit**. It cannot make a model far larger than your memory **fast**, and
+it tells you so before you wait for it.
 
-Measured example: the 5.0 GiB model above, squeezed into a 2 GiB RAM cage with 1 GiB of VRAM, stayed inside the limit but produced about one token every 35 seconds (measured with an earlier cage setting that has since been changed; not yet re-measured). For a 70B model at Q4_K_M (about 42 GiB) on this laptop, `shu plan` reports roughly 38 GiB re-read from disk per token, which means minutes per token.
+What the measurements show: the layers are used in order for every token, so once the
+CPU-side layers no longer fit in the RAM budget, the page cache always holds the wrong
+pages and every one of those layers is read from disk again for each token:
 
-The rule of thumb: a model runs at a useful speed when its file is at most about
-as large as the RAM plus VRAM you give it. Beyond that it still runs, inside the
-budget, at disk speed. `shu plan` prints the estimate for your model and budget,
-and suggests a smaller quantization when one would fit.
+    seconds per token ≈ size of the CPU-side layers ÷ disk read speed
+
+The 5.0 GiB model in the 2 GiB cage confirms it: 2.26 GiB read per token,
+2.9 seconds per token, which is a read rate of about 785 MiB/s on this laptop's disk.
+
+The same arithmetic for larger models at a 30% budget on this laptop. **These were not run**;
+they are the planner's layer sizes divided by the read rate measured above:
+
+| Model | File size | Layers on GPU | Re-read per token | Time per token |
+|---|---|---|---|---|
+| 14B at Q4_K_M | 8.6 GiB | 5 of 49 | 7.3 GiB | about 10 s |
+| 32B at Q4_K_M | 18.8 GiB | 3 of 65 | 17.6 GiB | about 23 s |
+| 70B at Q2_K | 26.4 GiB | 2 of 81 | 24.5 GiB | about 32 s |
+| 70B at Q4_K_M | 41.7 GiB | 1 of 81 | 40.2 GiB | about 52 s |
+| 120B at Q4_K_M | 66 GiB | 3 of 138 | 64.6 GiB | about 84 s |
+
+So a 70B model does run on this laptop inside 30% of it, at roughly a minute per token.
+That is a demonstration, not a chat. Files that large also cannot sit in any disk cache,
+so slower drives will do worse.
+
+The rule of thumb: a model runs at a useful speed when its file is at most about as large
+as the RAM plus VRAM you give it. Beyond that it still runs, inside the budget, at disk
+speed. `shu plan` times your disk and prints the estimate for your model, and suggests a
+smaller quantization when one would fit.
 
 ## Install
 

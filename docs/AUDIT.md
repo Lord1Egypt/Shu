@@ -38,6 +38,19 @@ Ollama 0.40 with its bundled llama.cpp.
 | Improve GPU detection, support several GPUs | Open: Shu plans and measures the first NVIDIA GPU only and says so. It cannot be tested on the single-GPU test machine |
 | Per-process VRAM instead of the change in total VRAM | Open: `nvidia-smi` reports no per-process memory under WSL2. Other GPU programs can still distort a measurement |
 
+## Checked on real hardware
+
+- Killing Shu with SIGKILL while serving: the engine was gone and no cage was left behind.
+- SIGTERM while serving: clean stop, exit code 0.
+- A request with a foreign `Origin` header got no CORS permission; a localhost origin did.
+- With another model loaded in Ollama, a measurement refused to start until `--unload-others` was given.
+- Thermal guard with a 64 C limit on a fully offloaded model: the engine was paused and resumed
+  repeatedly (bursts of about 9.5 tokens/s, 0.9 tokens/s overall). The run was cut off by the
+  test's own time limit before finishing, so there is no complete report for it, and the
+  frozen cage was cleaned up when Shu was terminated.
+- Known gap: a run shorter than about a second yields no CPU reading, so it ends as
+  "not measured" (exit code 3) rather than a pass.
+
 ## What the measurements changed
 
 Two results from re-measuring are worth more than the individual fixes.
